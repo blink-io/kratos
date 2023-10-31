@@ -3,8 +3,17 @@ package host
 import (
 	"fmt"
 	"net"
+	"net/netip"
 	"strconv"
 )
+
+type ll interface {
+	Addr() net.Addr
+}
+
+type ap interface {
+	AddrPort() netip.AddrPort
+}
 
 // ExtractHostPort from address
 func ExtractHostPort(addr string) (host string, port uint64, err error) {
@@ -23,15 +32,15 @@ func isValidIP(addr string) bool {
 }
 
 // Port return a real port.
-func Port(lis net.Listener) (int, bool) {
-	if addr, ok := lis.Addr().(*net.TCPAddr); ok {
-		return addr.Port, true
+func Port(lis ll) (int, bool) {
+	if addr, ok := lis.Addr().(ap); ok {
+		return int(addr.AddrPort().Port()), true
 	}
 	return 0, false
 }
 
 // Extract returns a private addr and port.
-func Extract(hostPort string, lis net.Listener) (string, error) {
+func Extract(hostPort string, lis ll) (string, error) {
 	addr, port, err := net.SplitHostPort(hostPort)
 	if err != nil && lis == nil {
 		return "", err
