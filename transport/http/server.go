@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"time"
 
+	"github.com/go-kratos/kratos/v2/transport/http/adapter"
 	"github.com/gorilla/mux"
 
 	"github.com/go-kratos/kratos/v2/internal/endpoint"
@@ -143,7 +144,9 @@ func PathPrefix(prefix string) ServerOption {
 
 // Server is an HTTP server wrapper.
 type Server struct {
-	*http.Server
+	//*http.Server
+	enableHttp3 bool
+	adp         adapter.ServerAdapter
 	lis         net.Listener
 	tlsConf     *tls.Config
 	endpoint    *url.URL
@@ -180,14 +183,20 @@ func NewServer(opts ...ServerOption) *Server {
 	for _, o := range opts {
 		o(srv)
 	}
+	// If http3 is enabled, use http3Adapter
+	if srv.enableHttp3 {
+
+	} else {
+
+	}
 	srv.router.StrictSlash(srv.strictSlash)
 	srv.router.NotFoundHandler = http.DefaultServeMux
 	srv.router.MethodNotAllowedHandler = http.DefaultServeMux
 	srv.router.Use(srv.filter())
-	srv.Server = &http.Server{
-		Handler:   FilterChain(srv.filters...)(srv.router),
-		TLSConfig: srv.tlsConf,
-	}
+	//srv.Server = &http.Server{
+	//	Handler:   FilterChain(srv.filters...)(srv.router),
+	//	TLSConfig: srv.tlsConf,
+	//}
 	return srv
 }
 
@@ -255,7 +264,7 @@ func (s *Server) HandleHeader(key, val string, h http.HandlerFunc) {
 
 // ServeHTTP should write reply headers and data to the ResponseWriter and then return.
 func (s *Server) ServeHTTP(res http.ResponseWriter, req *http.Request) {
-	s.Handler.ServeHTTP(res, req)
+	s.adp.Handler().ServeHTTP(res, req)
 }
 
 func (s *Server) filter() mux.MiddlewareFunc {
@@ -311,16 +320,13 @@ func (s *Server) Start(ctx context.Context) error {
 	if err := s.listenAndEndpoint(); err != nil {
 		return err
 	}
-	s.BaseContext = func(net.Listener) context.Context {
-		return ctx
-	}
 	log.Infof("[HTTP] server listening on: %s", s.lis.Addr().String())
 	var err error
-	if s.tlsConf != nil {
-		err = s.ServeTLS(s.lis, "", "")
-	} else {
-		err = s.Serve(s.lis)
-	}
+	//if s.tlsConf != nil {
+	//	err = s.ServeTLS(s.lis, "", "")
+	//} else {
+	//	err = s.Serve(s.lis)
+	//}
 	if !errors.Is(err, http.ErrServerClosed) {
 		return err
 	}
@@ -330,7 +336,7 @@ func (s *Server) Start(ctx context.Context) error {
 // Stop stop the HTTP server.
 func (s *Server) Stop(ctx context.Context) error {
 	log.Info("[HTTP] server stopping")
-	return s.Shutdown(ctx)
+	return s.adp.Shutdown(ctx)
 }
 
 func (s *Server) listenAndEndpoint() error {

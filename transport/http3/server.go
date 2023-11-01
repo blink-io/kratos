@@ -311,9 +311,6 @@ func (s *Server) Start(ctx context.Context) error {
 	if err := s.listenAndEndpoint(); err != nil {
 		return err
 	}
-	//s.BaseContext = func(net.Listener) context.Context {
-	//	return ctx
-	//}
 	log.Infof("[HTTP3] server listening on: %s", s.lis.Addr().String())
 	var err error
 	if s.tlsConf == nil {
