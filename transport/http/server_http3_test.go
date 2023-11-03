@@ -1,12 +1,14 @@
-package http3
+package http
 
 import (
 	"context"
 	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"reflect"
 	"strings"
@@ -15,40 +17,41 @@ import (
 
 	kratoserrors "github.com/go-kratos/kratos/v2/errors"
 	"github.com/go-kratos/kratos/v2/internal/host"
+	"github.com/go-kratos/kratos/v2/testdata"
 	"github.com/quic-go/quic-go"
 	"github.com/quic-go/quic-go/http3"
 )
 
-var h = func(w http.ResponseWriter, r *http.Request) {
-	_ = json.NewEncoder(w).Encode(testData{Path: r.RequestURI})
+var http3ClientTlsConf = createClientTLSConfig()
+
+var http3ServerConf = generateTLSConfig()
+
+func generateTLSConfig() *tls.Config {
+	return testdata.GetTLSConfig()
 }
 
-type testKey struct{}
+func createClientTLSConfig() *tls.Config {
+	pool, err := x509.SystemCertPool()
+	if err != nil {
+		log.Fatal(err)
+	}
+	testdata.AddRootCA(pool)
 
-type testData struct {
-	Path string `json:"path"`
+	tlsConf := &tls.Config{
+		RootCAs:            pool,
+		InsecureSkipVerify: true,
+		//KeyLogWriter:       keyLog,
+		MinVersion: tls.VersionTLS13,
+	}
+	return tlsConf
 }
 
-// handleFuncWrapper is a wrapper for http.HandlerFunc to implement http.Handler
-type handleFuncWrapper struct {
-	fn http.HandlerFunc
-}
-
-func (x *handleFuncWrapper) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
-	x.fn.ServeHTTP(writer, request)
-}
-
-func newHandleFuncWrapper(fn http.HandlerFunc) http.Handler {
-	return &handleFuncWrapper{fn: fn}
-}
-
-func TestServeHTTP(t *testing.T) {
-	tlsConf := generateTLSConfig()
-	ln, err := quic.ListenAddrEarly(":0", tlsConf, nil)
+func TestServeHTTP3(t *testing.T) {
+	ln, err := quic.ListenAddrEarly(":0", http3ClientTlsConf, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	mux := NewServer(Listener(ln))
+	mux := NewServer(EnableHTTP3(), HTTP3Listener(ln))
 	mux.HandleFunc("/index", h)
 	mux.Route("/errors").GET("/cause", func(ctx Context) error {
 		return kratoserrors.BadRequest("xxx", "zzz").
@@ -79,13 +82,9 @@ func TestServeHTTP(t *testing.T) {
 	}
 }
 
-func TestServer(t *testing.T) {
+func TestServerHTTP3(t *testing.T) {
 	ctx := context.Background()
-	tlsConf := generateTLSConfig()
-	srv := NewServer(
-		Address(":0"),
-		TLSConfig(tlsConf),
-	)
+	srv := NewServer(EnableHTTP3(), TLSConfig(generateTLSConfig()))
 	srv.Handle("/index", newHandleFuncWrapper(h))
 	srv.HandleFunc("/index/{id:[0-9]+}", h)
 	srv.HandlePrefix("/test/prefix", newHandleFuncWrapper(h))
@@ -107,17 +106,17 @@ func TestServer(t *testing.T) {
 			panic(err)
 		}
 	}()
-	time.Sleep(3 * time.Second)
-	testHeader(t, srv)
-	testClient(t, srv)
-	testAccept(t, srv)
-	time.Sleep(2 * time.Second)
+	time.Sleep(time.Second)
+	testHeaderHTTP3(t, srv)
+	testClientHTTP3(t, srv)
+	testAcceptHTTP3(t, srv)
+	time.Sleep(time.Second)
 	if srv.Stop(ctx) != nil {
 		t.Errorf("expected nil got %v", srv.Stop(ctx))
 	}
 }
 
-func testAccept(t *testing.T, srv *Server) {
+func testAcceptHTTP3(t *testing.T, srv *Server) {
 	tests := []struct {
 		method      string
 		path        string
@@ -130,15 +129,10 @@ func testAccept(t *testing.T, srv *Server) {
 	if err != nil {
 		t.Errorf("expected nil got %v", err)
 	}
-	tlsConf := createClientTLSConfig()
 	client, err := NewClient(context.Background(),
-		WithTLSConfig(tlsConf),
 		WithEndpoint(e.Host),
-		WithTransport(&http3.RoundTripper{
-			TLSClientConfig: tlsConf,
-			QuicConfig:      new(quic.Config),
-		}),
-	)
+		WithTransport(HTTP3RoundTripper(http3ClientTlsConf, nil)),
+		WithTLSConfig(http3ClientTlsConf))
 	if err != nil {
 		t.Errorf("expected nil got %v", err)
 	}
@@ -158,23 +152,20 @@ func testAccept(t *testing.T, srv *Server) {
 	}
 }
 
-func testHeader(t *testing.T, srv *Server) {
+func testHeaderHTTP3(t *testing.T, srv *Server) {
 	e, err := srv.Endpoint()
 	if err != nil {
 		t.Errorf("expected nil got %v", err)
 	}
-	tlsConf := createClientTLSConfig()
 	client, err := NewClient(context.Background(),
 		WithEndpoint(e.Host),
-		WithTLSConfig(tlsConf),
-		WithTransport(&http3.RoundTripper{
-			TLSClientConfig: tlsConf,
-			QuicConfig:      new(quic.Config),
-		}),
+		WithTransport(HTTP3RoundTripper(http3ClientTlsConf, nil)),
+		WithTLSConfig(http3ClientTlsConf),
 	)
 	if err != nil {
 		t.Errorf("expected nil got %v", err)
 	}
+
 	reqURL := fmt.Sprintf(e.String() + "/index")
 	req, err := http.NewRequest(http.MethodGet, reqURL, nil)
 	if err != nil {
@@ -188,7 +179,7 @@ func testHeader(t *testing.T, srv *Server) {
 	resp.Body.Close()
 }
 
-func testClient(t *testing.T, srv *Server) {
+func testClientHTTP3(t *testing.T, srv *Server) {
 	tests := []struct {
 		method string
 		path   string
@@ -214,18 +205,15 @@ func testClient(t *testing.T, srv *Server) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	tlsConf := createClientTLSConfig()
 	client, err := NewClient(context.Background(),
-		WithTLSConfig(tlsConf),
 		WithEndpoint(e.Host),
-		WithTransport(&http3.RoundTripper{
-			TLSClientConfig: tlsConf,
-			QuicConfig:      new(quic.Config),
-		}),
+		WithTransport(HTTP3RoundTripper(http3ClientTlsConf, nil)),
+		WithTLSConfig(http3ClientTlsConf),
 	)
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	defer client.Close()
 	for _, test := range tests {
 		var res testData
@@ -273,7 +261,7 @@ func testClient(t *testing.T, srv *Server) {
 	}
 }
 
-func BenchmarkServer(b *testing.B) {
+func BenchmarkServerHTTP3(b *testing.B) {
 	fn := func(w http.ResponseWriter, r *http.Request) {
 		data := &testData{Path: r.RequestURI}
 		_ = json.NewEncoder(w).Encode(data)
@@ -295,7 +283,10 @@ func BenchmarkServer(b *testing.B) {
 	if !ok {
 		b.Errorf("expected port got %v", srv.lis)
 	}
-	client, err := NewClient(context.Background(), WithEndpoint(fmt.Sprintf("127.0.0.1:%d", port)))
+	client, err := NewClient(context.Background(),
+		WithEndpoint(fmt.Sprintf("127.0.0.1:%d", port)),
+		WithTransport(HTTP3RoundTripper(http3ClientTlsConf, nil)),
+		WithTLSConfig(http3ClientTlsConf))
 	if err != nil {
 		b.Errorf("expected nil got %v", err)
 	}
@@ -311,92 +302,16 @@ func BenchmarkServer(b *testing.B) {
 	_ = srv.Stop(ctx)
 }
 
-func TestNetwork(t *testing.T) {
-	o := &Server{}
-	v := "abc"
-	Network(v)(o)
-	if !reflect.DeepEqual(v, o.network) {
-		t.Errorf("expected %v got %v", v, o.network)
-	}
-}
-
-func TestAddress(t *testing.T) {
-	o := &Server{}
-	v := "abc"
-	Address(v)(o)
-	if !reflect.DeepEqual(v, o.address) {
-		t.Errorf("expected %v got %v", v, o.address)
-	}
-}
-
-func TestTimeout(t *testing.T) {
-	o := &Server{}
-	v := time.Duration(123)
-	Timeout(v)(o)
-	if !reflect.DeepEqual(v, o.timeout) {
-		t.Errorf("expected %v got %v", v, o.timeout)
-	}
-}
-
-func TestLogger(_ *testing.T) {
-	// TODO
-}
-
-func TestRequestDecoder(t *testing.T) {
-	o := &Server{}
-	v := func(*http.Request, interface{}) error { return nil }
-	RequestDecoder(v)(o)
-	if o.decBody == nil {
-		t.Errorf("expected nil got %v", o.decBody)
-	}
-}
-
-func TestResponseEncoder(t *testing.T) {
-	o := &Server{}
-	v := func(http.ResponseWriter, *http.Request, interface{}) error { return nil }
-	ResponseEncoder(v)(o)
-	if o.enc == nil {
-		t.Errorf("expected nil got %v", o.enc)
-	}
-}
-
-func TestErrorEncoder(t *testing.T) {
-	o := &Server{}
-	v := func(http.ResponseWriter, *http.Request, error) {}
-	ErrorEncoder(v)(o)
-	if o.ene == nil {
-		t.Errorf("expected nil got %v", o.ene)
-	}
-}
-
-func TestTLSConfig(t *testing.T) {
-	o := &Server{}
-	v := &tls.Config{}
-	TLSConfig(v)(o)
-	if !reflect.DeepEqual(v, o.tlsConf) {
-		t.Errorf("expected %v got %v", v, o.tlsConf)
-	}
-}
-
-func TestStrictSlash(t *testing.T) {
-	o := &Server{}
-	v := true
-	StrictSlash(v)(o)
-	if !reflect.DeepEqual(v, o.strictSlash) {
-		t.Errorf("expected %v got %v", v, o.tlsConf)
-	}
-}
-
-func TestListener(t *testing.T) {
-	tlsConf := generateTLSConfig()
-	lis, err := quic.ListenAddrEarly(":0", tlsConf, nil)
+func TestListenerHTTP3(t *testing.T) {
+	http3Lis, err := quic.ListenAddrEarly(":0", http3ServerConf, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	s := &Server{}
-	Listener(lis)(s)
-	if !reflect.DeepEqual(s.lis, lis) {
-		t.Errorf("expected %v got %v", lis, s.lis)
+	EnableHTTP3()(s)
+	HTTP3Listener(http3Lis)(s)
+	if !reflect.DeepEqual(s.http3Lis, http3Lis) {
+		t.Errorf("expected %v got %v", http3Lis, s.http3Lis)
 	}
 	if e, err := s.Endpoint(); err != nil || e == nil {
 		t.Errorf("expected not empty")

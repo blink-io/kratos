@@ -9,8 +9,9 @@ import (
 	"net/url"
 	"time"
 
-	"github.com/go-kratos/kratos/v2/transport/http/adapter"
 	"github.com/gorilla/mux"
+	"github.com/quic-go/quic-go"
+	"github.com/quic-go/quic-go/http3"
 
 	"github.com/go-kratos/kratos/v2/internal/endpoint"
 	"github.com/go-kratos/kratos/v2/internal/host"
@@ -144,9 +145,7 @@ func PathPrefix(prefix string) ServerOption {
 
 // Server is an HTTP server wrapper.
 type Server struct {
-	//*http.Server
-	enableHttp3 bool
-	adp         adapter.ServerAdapter
+	httpsrv     *http.Server
 	lis         net.Listener
 	tlsConf     *tls.Config
 	endpoint    *url.URL
@@ -163,11 +162,16 @@ type Server struct {
 	ene         EncodeErrorFunc
 	strictSlash bool
 	router      *mux.Router
+	// For http/3
+	enableHttp3 bool
+	http3Lis    http3.QUICEarlyListener
+	http3srv    *http3.Server
 }
 
 // NewServer creates an HTTP server by options.
 func NewServer(opts ...ServerOption) *Server {
 	srv := &Server{
+		enableHttp3: false,
 		network:     "tcp",
 		address:     ":0",
 		timeout:     1 * time.Second,
@@ -183,20 +187,25 @@ func NewServer(opts ...ServerOption) *Server {
 	for _, o := range opts {
 		o(srv)
 	}
-	// If http3 is enabled, use http3Adapter
-	if srv.enableHttp3 {
-
-	} else {
-
-	}
 	srv.router.StrictSlash(srv.strictSlash)
 	srv.router.NotFoundHandler = http.DefaultServeMux
 	srv.router.MethodNotAllowedHandler = http.DefaultServeMux
 	srv.router.Use(srv.filter())
-	//srv.Server = &http.Server{
-	//	Handler:   FilterChain(srv.filters...)(srv.router),
-	//	TLSConfig: srv.tlsConf,
-	//}
+
+	// If http3 is enabled, use http3Adapter
+	hdlr := FilterChain(srv.filters...)(srv.router)
+	if srv.enableHttp3 {
+		srv.http3srv = &http3.Server{
+			TLSConfig: srv.tlsConf,
+			Handler:   hdlr,
+		}
+		log.Infof("Server is HTTP3")
+	} else {
+		srv.httpsrv = &http.Server{
+			TLSConfig: srv.tlsConf,
+			Handler:   hdlr,
+		}
+	}
 	return srv
 }
 
@@ -264,7 +273,11 @@ func (s *Server) HandleHeader(key, val string, h http.HandlerFunc) {
 
 // ServeHTTP should write reply headers and data to the ResponseWriter and then return.
 func (s *Server) ServeHTTP(res http.ResponseWriter, req *http.Request) {
-	s.adp.Handler().ServeHTTP(res, req)
+	if s.enableHttp3 {
+		s.http3srv.Handler.ServeHTTP(res, req)
+	} else {
+		s.httpsrv.Handler.ServeHTTP(res, req)
+	}
 }
 
 func (s *Server) filter() mux.MiddlewareFunc {
@@ -313,48 +326,96 @@ func (s *Server) Endpoint() (*url.URL, error) {
 		return nil, err
 	}
 	return s.endpoint, nil
+
 }
 
 // Start start the HTTP server.
 func (s *Server) Start(ctx context.Context) error {
-	if err := s.listenAndEndpoint(); err != nil {
-		return err
-	}
-	log.Infof("[HTTP] server listening on: %s", s.lis.Addr().String())
 	var err error
-	//if s.tlsConf != nil {
-	//	err = s.ServeTLS(s.lis, "", "")
-	//} else {
-	//	err = s.Serve(s.lis)
-	//}
+	if s.enableHttp3 {
+		err = s.startHTTP3(ctx)
+	} else {
+		err = s.startHTTP(ctx)
+	}
 	if !errors.Is(err, http.ErrServerClosed) {
 		return err
 	}
 	return nil
 }
 
+func (s *Server) startHTTP(ctx context.Context) error {
+	if err := s.listenAndEndpoint(); err != nil {
+		return err
+	}
+	s.httpsrv.BaseContext = func(net.Listener) context.Context {
+		return ctx
+	}
+	log.Infof("[HTTP] server listening on: %s", s.lis.Addr().String())
+	if s.tlsConf != nil {
+		return s.httpsrv.ServeTLS(s.lis, "", "")
+	} else {
+		return s.httpsrv.Serve(s.lis)
+	}
+}
+
+func (s *Server) startHTTP3(ctx context.Context) error {
+	if err := s.listenAndEndpoint(); err != nil {
+		return err
+	}
+	if s.tlsConf == nil {
+		return errors.New("[HTTP3], TLS is required")
+	}
+	log.Infof("[HTTP3] server listening on: %s", s.http3Lis.Addr().String())
+	return s.http3srv.ServeListener(s.http3Lis)
+}
+
 // Stop stop the HTTP server.
 func (s *Server) Stop(ctx context.Context) error {
-	log.Info("[HTTP] server stopping")
-	return s.adp.Shutdown(ctx)
+	if s.enableHttp3 {
+		log.Info("[HTTP3] server stopping")
+		return s.http3srv.Close()
+	} else {
+		log.Info("[HTTP] server stopping")
+		return s.httpsrv.Shutdown(ctx)
+	}
 }
 
 func (s *Server) listenAndEndpoint() error {
-	if s.lis == nil {
-		lis, err := net.Listen(s.network, s.address)
-		if err != nil {
-			s.err = err
-			return err
+	if s.enableHttp3 {
+		if s.http3Lis == nil {
+			http3Lis, err := quic.ListenAddrEarly(s.address, http3.ConfigureTLSConfig(s.tlsConf), nil)
+			if err != nil {
+				s.err = err
+				return err
+			}
+			s.http3Lis = http3Lis
 		}
-		s.lis = lis
+	} else {
+		if s.lis == nil {
+			lis, err := net.Listen(s.network, s.address)
+			if err != nil {
+				s.err = err
+				return err
+			}
+			s.lis = lis
+		}
 	}
+	if err := s.handleEndpoint(s.http3Lis); err != nil {
+		return err
+	}
+	return s.err
+}
+
+func (s *Server) handleEndpoint(ln interface {
+	Addr() net.Addr
+}) error {
 	if s.endpoint == nil {
-		addr, err := host.Extract(s.address, s.lis)
+		addr, err := host.Extract(s.address, ln)
 		if err != nil {
 			s.err = err
 			return err
 		}
 		s.endpoint = endpoint.NewEndpoint(endpoint.Scheme("http", s.tlsConf != nil), addr)
 	}
-	return s.err
+	return nil
 }
