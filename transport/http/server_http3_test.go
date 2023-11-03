@@ -3,12 +3,10 @@ package http
 import (
 	"context"
 	"crypto/tls"
-	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
-	"log"
 	"net/http"
 	"reflect"
 	"strings"
@@ -22,32 +20,16 @@ import (
 	"github.com/quic-go/quic-go/http3"
 )
 
-var http3ClientTlsConf = createClientTLSConfig()
+var http3ClientTlsConf = testdata.CreateClientTLSConfig()
 
-var http3ServerConf = generateTLSConfig()
+var http3ServerTlsConf = generateTLSConfig()
 
 func generateTLSConfig() *tls.Config {
 	return testdata.GetTLSConfig()
 }
 
-func createClientTLSConfig() *tls.Config {
-	pool, err := x509.SystemCertPool()
-	if err != nil {
-		log.Fatal(err)
-	}
-	testdata.AddRootCA(pool)
-
-	tlsConf := &tls.Config{
-		RootCAs:            pool,
-		InsecureSkipVerify: true,
-		//KeyLogWriter:       keyLog,
-		MinVersion: tls.VersionTLS13,
-	}
-	return tlsConf
-}
-
 func TestServeHTTP3(t *testing.T) {
-	ln, err := quic.ListenAddrEarly(":0", http3ClientTlsConf, nil)
+	ln, err := quic.ListenAddrEarly(":0", http3.ConfigureTLSConfig(http3ServerTlsConf), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -303,7 +285,7 @@ func BenchmarkServerHTTP3(b *testing.B) {
 }
 
 func TestListenerHTTP3(t *testing.T) {
-	http3Lis, err := quic.ListenAddrEarly(":0", http3ServerConf, nil)
+	http3Lis, err := quic.ListenAddrEarly(":0", http3ServerTlsConf, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
