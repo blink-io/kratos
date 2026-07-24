@@ -10,9 +10,10 @@ import (
 	stdhttp "net/http"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
-	"github.com/gorilla/websocket"
+	"github.com/coder/websocket"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/protobuf/proto"
@@ -62,19 +63,24 @@ type ClientStream interface {
 }
 
 type serverStream struct {
-	ctx       context.Context
-	req       *stdhttp.Request
-	res       stdhttp.ResponseWriter
-	mode      streamMode
-	conn      *websocket.Conn
-	header    metadata.MD
-	trailer   metadata.MD
-	encoder   encoding.Codec
-	decoder   encoding.Codec
-	started   bool
-	writeMu   sync.Mutex
-	upgrader  websocket.Upgrader
+	ctx context.Context
+	req *stdhttp.Request
+	res stdhttp.ResponseWriter
+	mode streamMode
+	conn *websocket.Conn
+	header metadata.MD
+	trailer metadata.MD
+	encoder encoding.Codec
+	decoder encoding.Codec
+	started bool
+	writeMu sync.Mutex
+	closeOnce sync.Once
+	closed int32
 	bodyField string
+
+	deadlineMu sync.RWMutex
+	readDeadline time.Time
+	writeDeadline time.Time
 }
 
 // ServerStreamOption customizes a server stream created by the HTTP transport.
@@ -116,7 +122,7 @@ func NewWebSocketServerStream(ctx Context, opts ...ServerStreamOption) (ServerSt
 	}
 	s.encoder = streamCodecFromHeaders(s.req.Header, "Accept", "Content-Type")
 	s.decoder = streamCodecFromHeaders(s.req.Header, "Content-Type", "Accept")
-	conn, err := s.upgrader.Upgrade(ctx.Response(), ctx.Request(), nil)
+	conn, err := websocket.Accept(s.res, s.req, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -154,7 +160,13 @@ func (s *serverStream) SetReadDeadline(t time.Time) error {
 		if s.conn == nil {
 			return stderrors.New("http: websocket connection not established")
 		}
-		return s.conn.SetReadDeadline(t)
+		if atomic.LoadInt32(&s.closed) == 1 {
+			return stderrors.New("http: stream is closed")
+		}
+		s.deadlineMu.Lock()
+		s.readDeadline = t
+		s.deadlineMu.Unlock()
+		return nil
 	case streamModeSSE:
 		return stdhttp.NewResponseController(s.res).SetReadDeadline(t)
 	default:
@@ -172,14 +184,38 @@ func (s *serverStream) SetWriteDeadline(t time.Time) error {
 		if s.conn == nil {
 			return stderrors.New("http: websocket connection not established")
 		}
-		s.writeMu.Lock()
-		defer s.writeMu.Unlock()
-		return s.conn.SetWriteDeadline(t)
+		if atomic.LoadInt32(&s.closed) == 1 {
+			return stderrors.New("http: stream is closed")
+		}
+		s.deadlineMu.Lock()
+		s.writeDeadline = t
+		s.deadlineMu.Unlock()
+		return nil
 	case streamModeSSE:
 		return stdhttp.NewResponseController(s.res).SetWriteDeadline(t)
 	default:
 		return stderrors.New("unknown HTTP stream mode")
 	}
+}
+
+func (s *serverStream) withReadDeadline(ctx context.Context) (context.Context, context.CancelFunc) {
+	s.deadlineMu.RLock()
+	d := s.readDeadline
+	s.deadlineMu.RUnlock()
+	if d.IsZero() {
+		return ctx, func() {}
+	}
+	return context.WithDeadline(ctx, d)
+}
+
+func (s *serverStream) withWriteDeadline(ctx context.Context) (context.Context, context.CancelFunc) {
+	s.deadlineMu.RLock()
+	d := s.writeDeadline
+	s.deadlineMu.RUnlock()
+	if d.IsZero() {
+		return ctx, func() {}
+	}
+	return context.WithDeadline(ctx, d)
 }
 
 func (s *serverStream) SetHeader(md metadata.MD) error {
@@ -274,7 +310,9 @@ func (s *serverStream) RecvMsg(m any) error {
 	if s.mode != streamModeWebSocket {
 		return io.EOF
 	}
-	return readWebSocketMessage(s.conn, m, s.decoder)
+	ctx, cancel := s.withReadDeadline(s.ctx)
+	defer cancel()
+	return readWebSocketMessage(ctx, s.conn, m, s.decoder)
 }
 
 func (s *serverStream) Close(err error) error {
@@ -292,14 +330,18 @@ func (s *serverStream) Close(err error) error {
 		if s.conn == nil {
 			return err
 		}
-		if err != nil {
-			_ = s.writeWebSocketControl(websocketControlError + err.Error())
-			_ = s.writeWebSocketClose(websocket.CloseInternalServerErr, err.Error())
-			_ = s.conn.Close()
-			return nil
-		}
-		_ = s.writeWebSocketClose(websocket.CloseNormalClosure, "")
-		return s.conn.Close()
+		s.closeOnce.Do(func() {
+			atomic.StoreInt32(&s.closed, 1)
+			if err != nil {
+				ctx, cancel := s.withWriteDeadline(s.ctx)
+				defer cancel()
+				_ = s.writeWebSocketControl(ctx, websocketControlError+err.Error())
+				go s.conn.Close(websocket.StatusInternalError, err.Error())
+				return
+			}
+			go s.conn.Close(websocket.StatusNormalClosure, "")
+		})
+		return nil
 	default:
 		return err
 	}
@@ -349,22 +391,23 @@ func (s *serverStream) writeWebSocketMessage(m any) error {
 	if err != nil {
 		return err
 	}
+	ctx, cancel := s.withWriteDeadline(s.ctx)
+	defer cancel()
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
-	return s.conn.WriteMessage(websocket.TextMessage, data)
+	if atomic.LoadInt32(&s.closed) == 1 {
+		return stderrors.New("http: stream is closed")
+	}
+	return s.conn.Write(ctx, websocket.MessageText, data)
 }
 
-func (s *serverStream) writeWebSocketControl(message string) error {
+func (s *serverStream) writeWebSocketControl(ctx context.Context, message string) error {
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
-	return s.conn.WriteMessage(websocket.TextMessage, []byte(message))
-}
-
-func (s *serverStream) writeWebSocketClose(code int, text string) error {
-	s.writeMu.Lock()
-	defer s.writeMu.Unlock()
-	msg := websocket.FormatCloseMessage(code, text)
-	return s.conn.WriteControl(websocket.CloseMessage, msg, time.Now().Add(time.Second))
+	if atomic.LoadInt32(&s.closed) == 1 {
+		return stderrors.New("http: stream is closed")
+	}
+	return s.conn.Write(ctx, websocket.MessageText, []byte(message))
 }
 
 type sseClientStream struct {
@@ -443,11 +486,10 @@ func (s *sseClientStream) RecvMsg(m any) error {
 }
 
 func (s *sseClientStream) closeBody() error {
-	if s.res == nil || s.res.Body == nil {
-		return nil
-	}
 	s.closeOnce.Do(func() {
-		s.closeErr = s.res.Body.Close()
+		if s.res != nil && s.res.Body != nil {
+			s.closeErr = s.res.Body.Close()
+		}
 	})
 	return s.closeErr
 }
@@ -551,11 +593,11 @@ func (s *websocketClientStream) SendMsg(m any) error {
 	if err := s.checkSendOpen(); err != nil {
 		return err
 	}
-	return s.conn.WriteMessage(websocket.TextMessage, data)
+	return s.conn.Write(s.ctx, websocket.MessageText, data)
 }
 
 func (s *websocketClientStream) RecvMsg(m any) error {
-	if err := readWebSocketMessage(s.conn, m, s.decoder); err != nil {
+	if err := readWebSocketMessage(s.ctx, s.conn, m, s.decoder); err != nil {
 		doneErr := err
 		if stderrors.Is(err, io.EOF) {
 			doneErr = nil
@@ -569,7 +611,7 @@ func (s *websocketClientStream) RecvMsg(m any) error {
 func (s *websocketClientStream) writeControl(message string) error {
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
-	return s.conn.WriteMessage(websocket.TextMessage, []byte(message))
+	return s.conn.Write(s.ctx, websocket.MessageText, []byte(message))
 }
 
 func (s *websocketClientStream) close(err error) error {
@@ -583,8 +625,7 @@ func (s *websocketClientStream) close(err error) error {
 		}
 		s.writeMu.Lock()
 		defer s.writeMu.Unlock()
-		_ = s.conn.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""), time.Now().Add(time.Second))
-		s.closeErr = s.conn.Close()
+		go s.conn.Close(websocket.StatusNormalClosure, "")
 	})
 	return s.closeErr
 }
@@ -646,7 +687,7 @@ func (client *Client) ServerSentEvent(ctx context.Context, method, path string, 
 			}
 		}
 		if doErr != nil {
-			if res != nil {
+			if res != nil && res.Body != nil {
 				_ = res.Body.Close()
 			}
 			return nil, doErr
@@ -723,12 +764,16 @@ func (client *Client) WebSocket(ctx context.Context, path string, opts ...CallOp
 			req.Host = node.Address()
 			dialURL = fmt.Sprintf("%s://%s%s", scheme, node.Address(), path)
 		}
-		dialer := websocket.Dialer{
-			Proxy:            stdhttp.ProxyFromEnvironment,
-			HandshakeTimeout: client.opts.timeout,
-			TLSClientConfig:  client.opts.tlsConf,
+		dialCtx := ctx
+		if client.opts.timeout > 0 {
+			var cancel context.CancelFunc
+			dialCtx, cancel = context.WithTimeout(ctx, client.opts.timeout)
+			defer cancel()
 		}
-		conn, res, dialErr := dialer.DialContext(ctx, dialURL, req.Header)
+		conn, res, dialErr := websocket.Dial(dialCtx, dialURL, &websocket.DialOptions{
+			HTTPHeader: req.Header,
+			HTTPClient: client.cc,
+		})
 		if res != nil {
 			cs := csAttempt{res: res}
 			for _, o := range opts {
@@ -820,16 +865,19 @@ func unmarshalStreamMessage(data []byte, v any, codec encoding.Codec) error {
 	return codec.Unmarshal(data, v)
 }
 
-func readWebSocketMessage(conn *websocket.Conn, m any, codec encoding.Codec) error {
+func readWebSocketMessage(ctx context.Context, conn *websocket.Conn, m any, codec encoding.Codec) error {
 	for {
-		messageType, data, err := conn.ReadMessage()
+		messageType, data, err := conn.Read(ctx)
 		if err != nil {
-			if websocket.IsCloseError(err, websocket.CloseNormalClosure, websocket.CloseGoingAway) {
+			if stderrors.Is(err, io.EOF) {
+				return io.EOF
+			}
+			if code := websocket.CloseStatus(err); code == websocket.StatusNormalClosure || code == websocket.StatusGoingAway {
 				return io.EOF
 			}
 			return err
 		}
-		if messageType != websocket.TextMessage && messageType != websocket.BinaryMessage {
+		if messageType != websocket.MessageText && messageType != websocket.MessageBinary {
 			continue
 		}
 		text := string(data)
