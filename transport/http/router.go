@@ -52,10 +52,10 @@ func (r *Router) Handle(method, relativePath string, h HandlerFunc, filters ...F
 	}))
 	next = FilterChain(filters...)(next)
 	next = FilterChain(r.filters...)(next)
-	route := r.srv.router.Handle(path.Join(r.prefix, relativePath), next)
-	if method != "*" {
-		route.Methods(method)
+	if method == "*" {
+		method = ""
 	}
+	r.srv.registerRoute(method, path.Join(r.prefix, relativePath), next)
 }
 
 // GET registers a new GET route for a path with matching handler in the router.

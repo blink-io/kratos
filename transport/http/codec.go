@@ -8,7 +8,6 @@ import (
 	"net/url"
 	"reflect"
 
-	"github.com/gorilla/mux"
 	"google.golang.org/genproto/googleapis/api/httpbody"
 	"google.golang.org/protobuf/proto"
 
@@ -51,7 +50,7 @@ type EncodeErrorFunc func(http.ResponseWriter, *http.Request, error)
 
 // DefaultRequestVars decodes the request vars to object.
 func DefaultRequestVars(r *http.Request, v any) error {
-	raws := mux.Vars(r)
+	raws := routeVars(r)
 	vars := make(url.Values, len(raws))
 	for k, v := range raws {
 		vars[k] = []string{v}

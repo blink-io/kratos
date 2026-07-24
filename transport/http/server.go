@@ -9,7 +9,7 @@ import (
 	"net/url"
 	"time"
 
-	"github.com/gorilla/mux"
+	"github.com/go-chi/chi/v5"
 
 	"github.com/go-kratos/kratos/v3/internal/endpoint"
 	"github.com/go-kratos/kratos/v3/internal/host"
@@ -112,7 +112,7 @@ func TLSConfig(c *tls.Config) ServerOption {
 	}
 }
 
-// StrictSlash is with mux's StrictSlash
+// StrictSlash defines the trailing slash behavior for routes.
 // If true, when the path pattern is "/path/", accessing "/path" will
 // redirect to the former and vice versa.
 func StrictSlash(strictSlash bool) ServerOption {
@@ -128,22 +128,27 @@ func Listener(lis net.Listener) ServerOption {
 	}
 }
 
-// PathPrefix with mux's PathPrefix, router will be replaced by a subrouter that start with prefix.
+// PathPrefix mounts a sub-router that starts with prefix, the router will be
+// replaced by the sub-router.
 func PathPrefix(prefix string) ServerOption {
 	return func(s *Server) {
-		s.router = s.router.PathPrefix(prefix).Subrouter()
+		sub := chi.NewRouter()
+		s.router.Mount(prefix, sub)
+		s.router = sub
 	}
 }
 
+// NotFoundHandler with server not found handler.
 func NotFoundHandler(handler http.Handler) ServerOption {
 	return func(s *Server) {
-		s.router.NotFoundHandler = handler
+		s.root.NotFound(handler.ServeHTTP)
 	}
 }
 
+// MethodNotAllowedHandler with server method not allowed handler.
 func MethodNotAllowedHandler(handler http.Handler) ServerOption {
 	return func(s *Server) {
-		s.router.MethodNotAllowedHandler = handler
+		s.root.MethodNotAllowed(handler.ServeHTTP)
 	}
 }
 
@@ -165,7 +170,9 @@ type Server struct {
 	enc         EncodeResponseFunc
 	ene         EncodeErrorFunc
 	strictSlash bool
-	router      *mux.Router
+	root        *chi.Mux
+	router      chi.Router
+	routes      *routeRegistry
 }
 
 // NewServer creates an HTTP server by options.
@@ -181,17 +188,20 @@ func NewServer(opts ...ServerOption) *Server {
 		enc:         DefaultResponseEncoder,
 		ene:         DefaultErrorEncoder,
 		strictSlash: true,
-		router:      mux.NewRouter(),
+		root:        chi.NewRouter(),
+		routes:      newRouteRegistry(),
 	}
-	srv.router.NotFoundHandler = http.DefaultServeMux
-	srv.router.MethodNotAllowedHandler = http.DefaultServeMux
+	srv.router = srv.root
+	srv.root.NotFound(http.DefaultServeMux.ServeHTTP)
+	srv.root.MethodNotAllowed(http.DefaultServeMux.ServeHTTP)
+	// chi requires all middlewares to be registered before routes,
+	// while options may mount sub-routers.
+	srv.root.Use(srv.filter())
 	for _, o := range opts {
 		o(srv)
 	}
-	srv.router.StrictSlash(srv.strictSlash)
-	srv.router.Use(srv.filter())
 	srv.Server = &http.Server{
-		Handler:   FilterChain(srv.filters...)(srv.router),
+		Handler:   FilterChain(srv.filters...)(srv.root),
 		TLSConfig: srv.tlsConf,
 	}
 	return srv
@@ -208,22 +218,23 @@ func (s *Server) Use(selector string, m ...middleware.Middleware) {
 
 // WalkRoute walks the router and all its sub-routers, calling walkFn for each route in the tree.
 func (s *Server) WalkRoute(fn WalkRouteFunc) error {
-	return s.router.Walk(func(route *mux.Route, _ *mux.Router, _ []*mux.Route) error {
-		methods, err := route.GetMethods()
-		if err != nil {
-			return nil // ignore no methods
+	for _, e := range s.routes.snapshot() {
+		switch e.kind {
+		case routeKindHeader:
+			// ignore routes without methods, like mux did
+			continue
+		case routeKindPrefix:
+			return errors.New("mux: route doesn't have a path template")
 		}
-		path, err := route.GetPathTemplate()
-		if err != nil {
+		if e.method == "" {
+			// ignore routes without methods, like mux did
+			continue
+		}
+		if err := fn(RouteInfo{Method: e.method, Path: e.pattern}); err != nil {
 			return err
 		}
-		for _, method := range methods {
-			if err := fn(RouteInfo{Method: method, Path: path}); err != nil {
-				return err
-			}
-		}
-		return nil
-	})
+	}
+	return nil
 }
 
 // WalkHandle walks the router and all its sub-routers, calling walkFn for each route in the tree.
@@ -241,22 +252,22 @@ func (s *Server) Route(prefix string, filters ...FilterFunc) *Router {
 
 // Handle registers a new route with a matcher for the URL path.
 func (s *Server) Handle(path string, h http.Handler) {
-	s.router.Handle(path, h)
+	s.registerRoute("", path, h)
 }
 
 // HandlePrefix registers a new route with a matcher for the URL path prefix.
 func (s *Server) HandlePrefix(prefix string, h http.Handler) {
-	s.router.PathPrefix(prefix).Handler(h)
+	s.registerPrefix(prefix, h)
 }
 
 // HandleFunc registers a new route with a matcher for the URL path.
 func (s *Server) HandleFunc(path string, h http.HandlerFunc) {
-	s.router.HandleFunc(path, h)
+	s.registerRoute("", path, h)
 }
 
 // HandleHeader registers a new route with a matcher for the header.
 func (s *Server) HandleHeader(key, val string, h http.HandlerFunc) {
-	s.router.Headers(key, val).Handler(h)
+	s.registerHeader(key, val, h)
 }
 
 // ServeHTTP should write reply headers and data to the ResponseWriter and then return.
@@ -264,9 +275,12 @@ func (s *Server) ServeHTTP(res http.ResponseWriter, req *http.Request) {
 	s.Handler.ServeHTTP(res, req)
 }
 
-func (s *Server) filter() mux.MiddlewareFunc {
+func (s *Server) filter() func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+			if s.strictSlash && s.strictSlashRedirect(w, req) {
+				return
+			}
 			var (
 				ctx    context.Context
 				cancel context.CancelFunc
@@ -279,9 +293,11 @@ func (s *Server) filter() mux.MiddlewareFunc {
 			defer cancel()
 
 			pathTemplate := req.URL.Path
-			if route := mux.CurrentRoute(req); route != nil {
+			if pattern := s.root.Find(chi.NewRouteContext(), req.Method, req.URL.Path); pattern != "" {
 				// /path/123 -> /path/{id}
-				pathTemplate, _ = route.GetPathTemplate()
+				if template, ok := s.routes.original(pattern); ok {
+					pathTemplate = template
+				}
 			}
 
 			tr := &Transport{

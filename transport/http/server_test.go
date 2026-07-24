@@ -373,18 +373,29 @@ func TestListener(t *testing.T) {
 }
 
 func TestNotFoundHandler(t *testing.T) {
-	mux := http.NewServeMux()
-	srv := NewServer(NotFoundHandler(mux))
-	if !reflect.DeepEqual(srv.router.NotFoundHandler, mux) {
-		t.Errorf("expected %v got %v", mux, srv.router.NotFoundHandler)
+	handler := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusTeapot)
+	})
+	srv := NewServer(NotFoundHandler(handler))
+	req := httptest.NewRequest(http.MethodGet, "/not-exist", nil)
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+	if w.Code != http.StatusTeapot {
+		t.Errorf("expected %d got %d", http.StatusTeapot, w.Code)
 	}
 }
 
 func TestMethodNotAllowedHandler(t *testing.T) {
-	mux := http.NewServeMux()
-	srv := NewServer(MethodNotAllowedHandler(mux))
-	if !reflect.DeepEqual(srv.router.MethodNotAllowedHandler, mux) {
-		t.Errorf("expected %v got %v", mux, srv.router.MethodNotAllowedHandler)
+	handler := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusTeapot)
+	})
+	srv := NewServer(MethodNotAllowedHandler(handler))
+	srv.Route("/").GET("/index", func(Context) error { return nil })
+	req := httptest.NewRequest(http.MethodPost, "/index", nil)
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+	if w.Code != http.StatusTeapot {
+		t.Errorf("expected %d got %d", http.StatusTeapot, w.Code)
 	}
 }
 
