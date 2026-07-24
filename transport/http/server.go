@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -140,54 +141,71 @@ func PathPrefix(prefix string) ServerOption {
 
 func NotFoundHandler(handler http.Handler) ServerOption {
 	return func(s *Server) {
-		s.router.NotFound(toHandlerFunc(handler))
+		s.notFoundHandler = handler
 	}
 }
 
 func MethodNotAllowedHandler(handler http.Handler) ServerOption {
 	return func(s *Server) {
-		s.router.MethodNotAllowed(toHandlerFunc(handler))
+		s.methodNotAllowedHandler = handler
 	}
 }
 
 // Server is an HTTP server wrapper.
 type Server struct {
 	*http.Server
-	lis         net.Listener
-	tlsConf     *tls.Config
-	endpoint    *url.URL
-	err         error
-	network     string
-	address     string
-	timeout     time.Duration
-	filters     []FilterFunc
-	middleware  matcher.Matcher
-	decVars     DecodeRequestFunc
-	decQuery    DecodeRequestFunc
-	decBody     DecodeRequestFunc
-	enc         EncodeResponseFunc
-	ene         EncodeErrorFunc
-	strictSlash bool
-	router      *chi.Mux
+	lis                     net.Listener
+	tlsConf                 *tls.Config
+	endpoint                *url.URL
+	err                     error
+	network                 string
+	address                 string
+	timeout                 time.Duration
+	filters                 []FilterFunc
+	middleware              matcher.Matcher
+	decVars                 DecodeRequestFunc
+	decQuery                DecodeRequestFunc
+	decBody                 DecodeRequestFunc
+	enc                     EncodeResponseFunc
+	ene                     EncodeErrorFunc
+	strictSlash             bool
+	router                  *chi.Mux
+	prefixMu                sync.RWMutex
+	prefixHandlers          []prefixHandlerEntry
+	notFoundHandler         http.Handler
+	methodNotAllowedHandler http.Handler
+}
+
+// prefixHandlerEntry stores a HandlePrefix registration. Entries are
+// consulted from the chi NotFound dispatcher so that prefix matching
+// replicates gorilla/mux's string-prefix semantics (e.g. prefix "/foo"
+// also matches "/foobar") and never overrides a more specific route
+// registered via Handle/HandleFunc/Route.
+type prefixHandlerEntry struct {
+	prefix  string
+	handler http.Handler
 }
 
 // NewServer creates an HTTP server by options.
 func NewServer(opts ...ServerOption) *Server {
 	srv := &Server{
-		network:     "tcp",
-		address:     ":0",
-		timeout:     1 * time.Second,
-		middleware:  matcher.New(),
-		decVars:     DefaultRequestVars,
-		decQuery:    DefaultRequestQuery,
-		decBody:     DefaultRequestDecoder,
-		enc:         DefaultResponseEncoder,
-		ene:         DefaultErrorEncoder,
-		strictSlash: true,
-		router:      chi.NewRouter(),
+		network:                 "tcp",
+		address:                 ":0",
+		timeout:                 1 * time.Second,
+		middleware:              matcher.New(),
+		decVars:                 DefaultRequestVars,
+		decQuery:                DefaultRequestQuery,
+		decBody:                 DefaultRequestDecoder,
+		enc:                     DefaultResponseEncoder,
+		ene:                     DefaultErrorEncoder,
+		strictSlash:             true,
+		router:                  chi.NewRouter(),
+		prefixHandlers:          make([]prefixHandlerEntry, 0),
+		notFoundHandler:         http.DefaultServeMux,
+		methodNotAllowedHandler: http.DefaultServeMux,
 	}
-	srv.router.NotFound(toHandlerFunc(http.DefaultServeMux))
-	srv.router.MethodNotAllowed(toHandlerFunc(http.DefaultServeMux))
+	srv.router.NotFound(http.HandlerFunc(srv.dispatchNotFound))
+	srv.router.MethodNotAllowed(http.HandlerFunc(srv.dispatchMethodNotAllowed))
 	for _, o := range opts {
 		o(srv)
 	}
@@ -198,6 +216,41 @@ func NewServer(opts ...ServerOption) *Server {
 		TLSConfig: srv.tlsConf,
 	}
 	return srv
+}
+
+// dispatchNotFound is the chi NotFound handler. It first consults the
+// HandlePrefix registrations (longest prefix wins) and only falls back to
+// the configured not-found handler when no prefix matches.
+func (s *Server) dispatchNotFound(w http.ResponseWriter, r *http.Request) {
+	if h := s.matchPrefix(r.URL.Path); h != nil {
+		h.ServeHTTP(w, r)
+		return
+	}
+	s.notFoundHandler.ServeHTTP(w, r)
+}
+
+// dispatchMethodNotAllowed is the chi MethodNotAllowed handler.
+func (s *Server) dispatchMethodNotAllowed(w http.ResponseWriter, r *http.Request) {
+	s.methodNotAllowedHandler.ServeHTTP(w, r)
+}
+
+// matchPrefix returns the handler registered for the longest registered
+// prefix that is a leading substring of path, or nil if none matches.
+func (s *Server) matchPrefix(path string) http.Handler {
+	s.prefixMu.RLock()
+	defer s.prefixMu.RUnlock()
+	var matched http.Handler
+	var longest int
+	for _, e := range s.prefixHandlers {
+		if len(e.prefix) <= longest {
+			continue
+		}
+		if strings.HasPrefix(path, e.prefix) {
+			matched = e.handler
+			longest = len(e.prefix)
+		}
+	}
+	return matched
 }
 
 // Use uses a service middleware with selector.
@@ -238,20 +291,15 @@ func (s *Server) Handle(path string, h http.Handler) {
 }
 
 // HandlePrefix registers a new route with a matcher for the URL path prefix.
-// The handler receives the request with the original URL path intact.
+// Behaves like gorilla/mux's PathPrefix(prefix).Handler(h): the handler is
+// invoked for every request whose path begins with prefix (including
+// overlapping paths such as prefix == "/test/prefix" matching
+// "/test/prefixfoo"). Routes registered via Handle/HandleFunc/Route take
+// precedence over prefix handlers.
 func (s *Server) HandlePrefix(prefix string, h http.Handler) {
-	// gorilla/mux's PathPrefix(prefix).Handler(h) matches every request
-	// whose path begins with prefix. We register two patterns via chi's
-	// Handle (which matches every HTTP method):
-	//   - prefix        -> exact prefix (no trailing characters)
-	//   - prefix "/" "*" -> path segments below the prefix
-	if strings.HasSuffix(prefix, "/") {
-		s.router.Handle(prefix+"*", h)
-	} else {
-		s.router.Handle(prefix, h)
-		s.router.Handle(prefix+"/", h)
-		s.router.Handle(prefix+"/*", h)
-	}
+	s.prefixMu.Lock()
+	s.prefixHandlers = append(s.prefixHandlers, prefixHandlerEntry{prefix: prefix, handler: h})
+	s.prefixMu.Unlock()
 }
 
 // HandleFunc registers a new route with a matcher for the URL path.

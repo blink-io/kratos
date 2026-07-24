@@ -191,6 +191,8 @@ func testClient(t *testing.T, srv *Server) {
 		{http.MethodGet, "/index/notfound", http.StatusNotFound},
 		{http.MethodGet, "/errors/cause", http.StatusBadRequest},
 		{http.MethodGet, "/test/prefix/123111", http.StatusOK},
+		{http.MethodGet, "/test/prefixfoo", http.StatusOK},
+		{http.MethodGet, "/test/prefix", http.StatusOK},
 	}
 	e, err := srv.Endpoint()
 	if err != nil {
