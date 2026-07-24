@@ -10,7 +10,7 @@ import (
 	"github.com/go-kratos/kratos/v3/registry"
 
 	appsv1 "k8s.io/api/apps/v1"
-	apiv1 "k8s.io/api/core/v1"
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
@@ -35,21 +35,21 @@ var deployment = appsv1.Deployment{
 				"app": podName,
 			},
 		},
-		Template: apiv1.PodTemplateSpec{
+		Template: corev1.PodTemplateSpec{
 			ObjectMeta: metav1.ObjectMeta{
 				Labels: map[string]string{
 					"app": podName,
 				},
 			},
-			Spec: apiv1.PodSpec{
-				Containers: []apiv1.Container{
+			Spec: corev1.PodSpec{
+				Containers: []corev1.Container{
 					{
 						Name:  "nginx",
 						Image: "nginx:alpine",
-						Ports: []apiv1.ContainerPort{
+						Ports: []corev1.ContainerPort{
 							{
 								Name:          "http",
-								Protocol:      apiv1.ProtocolTCP,
+								Protocol:      corev1.ProtocolTCP,
 								ContainerPort: 80,
 							},
 						},

@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	kratoserror "github.com/go-kratos/kratos/v3/errors"
+	kerrors "github.com/go-kratos/kratos/v3/errors"
 )
 
 type (
@@ -49,7 +49,7 @@ func TestBindQuery(t *testing.T) {
 				vars:   map[string][]string{"age": {"kratos"}, "url": {"https://go-kratos.dev/"}},
 				target: &testBind2{},
 			},
-			err: kratoserror.BadRequest("CODEC", "Field Namespace:age ERROR:Invalid Integer Value 'kratos' Type 'int' Namespace 'age'"),
+			err: kerrors.BadRequest("CODEC", "Field Namespace:age ERROR:Invalid Integer Value 'kratos' Type 'int' Namespace 'age'"),
 		},
 		{
 			name: "test2",
@@ -64,7 +64,7 @@ func TestBindQuery(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			err := bindQuery(tt.args.vars, tt.args.target)
-			if !kratoserror.Is(err, tt.err) {
+			if !kerrors.Is(err, tt.err) {
 				t.Fatalf("bindQuery() error = %v, err %v", err, tt.err)
 			}
 			if err == nil && !reflect.DeepEqual(tt.args.target, tt.want) {
@@ -118,7 +118,7 @@ func TestBindForm(t *testing.T) {
 				},
 				target: &testBind2{},
 			},
-			err:  kratoserror.BadRequest("CODEC", "Field Namespace:age ERROR:Invalid Integer Value 'a' Type 'int' Namespace 'age'"),
+			err:  kerrors.BadRequest("CODEC", "Field Namespace:age ERROR:Invalid Integer Value 'a' Type 'int' Namespace 'age'"),
 			want: nil,
 		},
 	}

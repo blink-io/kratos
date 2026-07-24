@@ -6,7 +6,7 @@ import (
 
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
-	metricsdk "go.opentelemetry.io/otel/sdk/metric"
+	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"google.golang.org/grpc/codes"
 
 	"github.com/go-kratos/kratos/v3/errors"
@@ -71,14 +71,14 @@ func DefaultSecondsHistogram(meter metric.Meter, histogramName string) (metric.F
 // view := SecondsHistogramView()
 // mp := sdkmetric.NewMeterProvider(sdkmetric.WithView(view))
 // otel.SetMeterProvider(mp)
-func DefaultSecondsHistogramView(histogramName string) metricsdk.View {
-	return func(instrument metricsdk.Instrument) (metricsdk.Stream, bool) {
+func DefaultSecondsHistogramView(histogramName string) sdkmetric.View {
+	return func(instrument sdkmetric.Instrument) (sdkmetric.Stream, bool) {
 		if instrument.Name == histogramName {
-			return metricsdk.Stream{
+			return sdkmetric.Stream{
 				Name:        instrument.Name,
 				Description: instrument.Description,
 				Unit:        instrument.Unit,
-				Aggregation: metricsdk.AggregationExplicitBucketHistogram{
+				Aggregation: sdkmetric.AggregationExplicitBucketHistogram{
 					Boundaries: []float64{0.005, 0.01, 0.025, 0.05, 0.1, 0.250, 0.5, 1},
 					NoMinMax:   true,
 				},
@@ -87,7 +87,7 @@ func DefaultSecondsHistogramView(histogramName string) metricsdk.View {
 				},
 			}, true
 		}
-		return metricsdk.Stream{}, false
+		return sdkmetric.Stream{}, false
 	}
 }
 

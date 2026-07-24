@@ -9,7 +9,7 @@ import (
 	"reflect"
 	"testing"
 
-	srvContractPb "github.com/opensergo/opensergo-go/proto/service_contract/v1"
+	v1 "github.com/opensergo/opensergo-go/proto/service_contract/v1"
 	"google.golang.org/genproto/googleapis/api/annotations"
 	"google.golang.org/grpc"
 	"google.golang.org/protobuf/proto"
@@ -20,11 +20,11 @@ import (
 )
 
 type testMetadataServiceServer struct {
-	srvContractPb.UnimplementedMetadataServiceServer
+	v1.UnimplementedMetadataServiceServer
 }
 
-func (m *testMetadataServiceServer) ReportMetadata(_ context.Context, _ *srvContractPb.ReportMetadataRequest) (*srvContractPb.ReportMetadataReply, error) {
-	return &srvContractPb.ReportMetadataReply{}, nil
+func (m *testMetadataServiceServer) ReportMetadata(_ context.Context, _ *v1.ReportMetadataRequest) (*v1.ReportMetadataReply, error) {
+	return &v1.ReportMetadataReply{}, nil
 }
 
 type testAppInfo struct {
@@ -127,13 +127,13 @@ func TestListDescriptors(t *testing.T) {
 	}
 
 	want := struct {
-		services []*srvContractPb.ServiceDescriptor
-		types    []*srvContractPb.TypeDescriptor
+		services []*v1.ServiceDescriptor
+		types    []*v1.TypeDescriptor
 	}{
-		services: []*srvContractPb.ServiceDescriptor{
+		services: []*v1.ServiceDescriptor{
 			{
 				Name: "TestService",
-				Methods: []*srvContractPb.MethodDescriptor{
+				Methods: []*v1.MethodDescriptor{
 					{
 						Name:            "Create",
 						InputTypes:      []string{"test.TestMessage"},
@@ -147,20 +147,20 @@ func TestListDescriptors(t *testing.T) {
 				},
 			},
 		},
-		types: []*srvContractPb.TypeDescriptor{
+		types: []*v1.TypeDescriptor{
 			{
 				Name: "TestMessage",
-				Fields: []*srvContractPb.FieldDescriptor{
+				Fields: []*v1.FieldDescriptor{
 					{
 						Name:     "id",
 						Number:   int32(1),
-						Type:     srvContractPb.FieldDescriptor_TYPE_INT32,
+						Type:     v1.FieldDescriptor_TYPE_INT32,
 						TypeName: proto.String("int32"),
 					},
 					{
 						Name:     "name",
 						Number:   int32(2),
-						Type:     srvContractPb.FieldDescriptor_TYPE_STRING,
+						Type:     v1.FieldDescriptor_TYPE_STRING,
 						TypeName: proto.String("string"),
 					},
 				},
@@ -268,7 +268,7 @@ func TestHTTPPatternInfo(t *testing.T) {
 
 func TestOpenSergo(t *testing.T) {
 	srv := grpc.NewServer()
-	srvContractPb.RegisterMetadataServiceServer(srv, new(testMetadataServiceServer))
+	v1.RegisterMetadataServiceServer(srv, new(testMetadataServiceServer))
 	lis, err := net.Listen("tcp", "127.0.0.1:9090")
 	if err != nil {
 		t.Fatalf("net.Listen error:%s", err)

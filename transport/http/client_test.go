@@ -18,7 +18,7 @@ import (
 	"google.golang.org/genproto/googleapis/api/httpbody"
 	"google.golang.org/protobuf/types/known/emptypb"
 
-	kratoserrors "github.com/go-kratos/kratos/v3/errors"
+	kerrors "github.com/go-kratos/kratos/v3/errors"
 	"github.com/go-kratos/kratos/v3/middleware"
 	"github.com/go-kratos/kratos/v3/registry"
 	"github.com/go-kratos/kratos/v3/selector"
@@ -260,7 +260,7 @@ func TestDefaultRequestEncoderUnknownCodec(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error")
 	}
-	se := new(kratoserrors.Error)
+	se := new(kerrors.Error)
 	if !errors.As(err, &se) {
 		t.Fatalf("expected kratos error, got %T", err)
 	}
@@ -375,14 +375,14 @@ func TestDefaultErrorDecoder(t *testing.T) {
 	if err == nil {
 		t.Errorf("expected error, got nil")
 	}
-	if err.(*kratoserrors.Error).Code != int32(500) {
-		t.Errorf("expected %v, got %v", 500, err.(*kratoserrors.Error).Code)
+	if err.(*kerrors.Error).Code != int32(500) {
+		t.Errorf("expected %v, got %v", 500, err.(*kerrors.Error).Code)
 	}
-	if err.(*kratoserrors.Error).Message != "hi" {
-		t.Errorf("expected %v, got %v", "hi", err.(*kratoserrors.Error).Message)
+	if err.(*kerrors.Error).Message != "hi" {
+		t.Errorf("expected %v, got %v", "hi", err.(*kerrors.Error).Message)
 	}
-	if err.(*kratoserrors.Error).Reason != "FOO" {
-		t.Errorf("expected %v, got %v", "FOO", err.(*kratoserrors.Error).Reason)
+	if err.(*kerrors.Error).Reason != "FOO" {
+		t.Errorf("expected %v, got %v", "FOO", err.(*kerrors.Error).Reason)
 	}
 }
 
