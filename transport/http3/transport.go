@@ -1,0 +1,154 @@
+package http3
+
+import (
+	"context"
+	"net/http"
+
+	"github.com/go-kratos/kratos/v3/transport"
+)
+
+var _ Transporter = (*Transport)(nil)
+
+var _ ResponseTransporter = (*Transport)(nil)
+
+// Transporter is http3 Transporter.
+type Transporter interface {
+	transport.Transporter
+	Request() *http.Request
+	PathTemplate() string
+}
+
+// ResponseTransporter extends Transporter with HTTP/3 response access.
+// This interface provides access to the http.ResponseWriter for use cases
+// like file downloads, streaming responses, or direct response manipulation.
+type ResponseTransporter interface {
+	Transporter
+	Response() http.ResponseWriter
+}
+
+// Transport is an HTTP/3 transport.
+// HTTP/3 reuses the standard net/http wire codecs (request/response/headers),
+// so the transport only needs to identify itself with a different Kind and
+// serve as a carrier for the underlying *http.Request and http.ResponseWriter.
+type Transport struct {
+	endpoint     string
+	operation    string
+	reqHeader    headerCarrier
+	replyHeader  headerCarrier
+	request      *http.Request
+	response     http.ResponseWriter
+	pathTemplate string
+}
+
+// Kind returns the transport kind.
+func (tr *Transport) Kind() transport.Kind {
+	return transport.KindHTTP3
+}
+
+// Endpoint returns the transport endpoint.
+func (tr *Transport) Endpoint() string {
+	return tr.endpoint
+}
+
+// Operation returns the transport operation.
+func (tr *Transport) Operation() string {
+	return tr.operation
+}
+
+// Request returns the HTTP/3 request.
+func (tr *Transport) Request() *http.Request {
+	return tr.request
+}
+
+// RequestHeader returns the request header.
+func (tr *Transport) RequestHeader() transport.Header {
+	return tr.reqHeader
+}
+
+// Response returns the HTTP/3 response.
+func (tr *Transport) Response() http.ResponseWriter {
+	return tr.response
+}
+
+// ReplyHeader returns the reply header.
+func (tr *Transport) ReplyHeader() transport.Header {
+	return tr.replyHeader
+}
+
+// PathTemplate returns the http3 path template.
+func (tr *Transport) PathTemplate() string {
+	return tr.pathTemplate
+}
+
+// SetOperation sets the transport operation.
+func SetOperation(ctx context.Context, op string) {
+	if tr, ok := transport.FromServerContext(ctx); ok {
+		if tr, ok := tr.(*Transport); ok {
+			tr.operation = op
+		}
+	}
+}
+
+// SetCookie adds a Set-Cookie header to the provided [ResponseWriter]'s headers.
+// The provided cookie must have a valid Name. Invalid cookies may be
+// silently dropped.
+func SetCookie(ctx context.Context, cookie *http.Cookie) {
+	if tr, ok := transport.FromServerContext(ctx); ok {
+		if tr, ok := tr.(*Transport); ok {
+			http.SetCookie(tr.response, cookie)
+		}
+	}
+}
+
+// RequestFromServerContext returns request from context.
+func RequestFromServerContext(ctx context.Context) (*http.Request, bool) {
+	if tr, ok := transport.FromServerContext(ctx); ok {
+		if tr, ok := tr.(Transporter); ok {
+			return tr.Request(), true
+		}
+	}
+	return nil, false
+}
+
+type headerCarrier http.Header
+
+// Get returns the value associated with the passed key.
+func (hc headerCarrier) Get(key string) string {
+	return http.Header(hc).Get(key)
+}
+
+// Set stores the key-value pair.
+func (hc headerCarrier) Set(key string, value string) {
+	http.Header(hc).Set(key, value)
+}
+
+// Add append value to key-values pair.
+func (hc headerCarrier) Add(key string, value string) {
+	http.Header(hc).Add(key, value)
+}
+
+// Keys lists the keys stored in this carrier.
+func (hc headerCarrier) Keys() []string {
+	keys := make([]string, 0, len(hc))
+	for k := range http.Header(hc) {
+		keys = append(keys, k)
+	}
+	return keys
+}
+
+// Values returns a slice of values associated with the passed key.
+func (hc headerCarrier) Values(key string) []string {
+	return http.Header(hc).Values(key)
+}
+
+// ResponseWriterFromServerContext returns the http.ResponseWriter from context if available.
+// This function provides backward compatibility and safe access to the ResponseWriter.
+// Returns nil if the transport doesn't implement ResponseTransporter.
+func ResponseWriterFromServerContext(ctx context.Context) (http.ResponseWriter, bool) {
+	if tr, ok := transport.FromServerContext(ctx); ok {
+		if tr, ok := tr.(ResponseTransporter); ok {
+			return tr.Response(), true
+		}
+	}
+	return nil, false
+}

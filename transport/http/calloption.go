@@ -14,22 +14,25 @@ const (
 // CallOption configures a Call before it starts or extracts information from
 // a Call after it completes.
 type CallOption interface {
-	// before is called before the call is sent to any server. If before
+	// Before is called before the call is sent to any server. If Before
 	// returns a non-nil error, the RPC fails with that error.
-	before(*callInfo) error
+	Before(*CallInfo) error
 
-	// after is called after the call has completed. after cannot return an
+	// After is called after the call has completed. After cannot return an
 	// error, so any failures should be reported via output parameters.
-	after(*callInfo, *csAttempt)
+	After(*CallInfo, *CsAttempt)
 }
 
-type callInfo struct {
-	contentType    string
-	contentTypeSet bool
-	accept         string
-	operation      string
-	pathTemplate   string
-	headerCarrier  *http.Header
+// CallInfo is the per-call mutable state shared with before/after hooks.
+// It is exported so alternative transport implementations (e.g. HTTP/3) can
+// reuse the same call option semantics.
+type CallInfo struct {
+	ContentType    string
+	ContentTypeSet bool
+	Accept         string
+	Operation      string
+	PathTemplate   string
+	HeaderCarrier  *http.Header
 }
 
 // EmptyCallOption does not alter the Call configuration.
@@ -37,11 +40,12 @@ type callInfo struct {
 // by interceptors.
 type EmptyCallOption struct{}
 
-func (EmptyCallOption) before(*callInfo) error      { return nil }
-func (EmptyCallOption) after(*callInfo, *csAttempt) {}
+func (EmptyCallOption) Before(*CallInfo) error      { return nil }
+func (EmptyCallOption) After(*CallInfo, *CsAttempt) {}
 
-type csAttempt struct {
-	res *http.Response
+// CsAttempt is the post-call attempt state exposed to after-call hooks.
+type CsAttempt struct {
+	Res *http.Response
 }
 
 // ContentType with request content type.
@@ -55,9 +59,9 @@ type ContentTypeCallOption struct {
 	ContentType string
 }
 
-func (o ContentTypeCallOption) before(c *callInfo) error {
-	c.contentType = o.ContentType
-	c.contentTypeSet = true
+func (o ContentTypeCallOption) Before(c *CallInfo) error {
+	c.ContentType = o.ContentType
+	c.ContentTypeSet = true
 	return nil
 }
 
@@ -72,16 +76,18 @@ type AcceptCallOption struct {
 	ContentType string
 }
 
-func (o AcceptCallOption) before(c *callInfo) error {
-	c.accept = o.ContentType
+func (o AcceptCallOption) Before(c *CallInfo) error {
+	c.Accept = o.ContentType
 	return nil
 }
 
-func defaultCallInfo(path string) callInfo {
-	return callInfo{
-		contentType:  contentTypeJSON,
-		operation:    path,
-		pathTemplate: path,
+// DefaultCallInfo returns a CallInfo populated with defaults shared by both
+// HTTP/1.1 and HTTP/3 transports.
+func DefaultCallInfo(path string) CallInfo {
+	return CallInfo{
+		ContentType:  contentTypeJSON,
+		Operation:    path,
+		PathTemplate: path,
 	}
 }
 
@@ -96,8 +102,8 @@ type OperationCallOption struct {
 	Operation string
 }
 
-func (o OperationCallOption) before(c *callInfo) error {
-	c.operation = o.Operation
+func (o OperationCallOption) Before(c *CallInfo) error {
+	c.Operation = o.Operation
 	return nil
 }
 
@@ -112,30 +118,30 @@ type PathTemplateCallOption struct {
 	Pattern string
 }
 
-func (o PathTemplateCallOption) before(c *callInfo) error {
-	c.pathTemplate = o.Pattern
+func (o PathTemplateCallOption) Before(c *CallInfo) error {
+	c.PathTemplate = o.Pattern
 	return nil
 }
 
 // Header returns a CallOptions that retrieves the http response header
 // from server reply.
 func Header(header *http.Header) CallOption {
-	return HeaderCallOption{header: header}
+	return HeaderCallOption{Header: header}
 }
 
 // HeaderCallOption is retrieve response header for client call
 type HeaderCallOption struct {
 	EmptyCallOption
-	header *http.Header
+	Header *http.Header
 }
 
-func (o HeaderCallOption) before(c *callInfo) error {
-	c.headerCarrier = o.header
+func (o HeaderCallOption) Before(c *CallInfo) error {
+	c.HeaderCarrier = o.Header
 	return nil
 }
 
-func (o HeaderCallOption) after(_ *callInfo, cs *csAttempt) {
-	if cs.res != nil && cs.res.Header != nil {
-		*o.header = cs.res.Header
+func (o HeaderCallOption) After(_ *CallInfo, cs *CsAttempt) {
+	if cs.Res != nil && cs.Res.Header != nil {
+		*o.Header = cs.Res.Header
 	}
 }

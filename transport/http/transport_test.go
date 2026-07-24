@@ -96,8 +96,8 @@ func TestSetOperation(t *testing.T) {
 	tr := &Transport{}
 	ctx := transport.NewServerContext(context.Background(), tr)
 	SetOperation(ctx, "kratos")
-	if !reflect.DeepEqual(tr.operation, "kratos") {
-		t.Errorf("expect %v, got %v", "kratos", tr.operation)
+	if tr.Operation() != "kratos" {
+		t.Errorf("expect %v, got %v", "kratos", tr.Operation())
 	}
 }
 

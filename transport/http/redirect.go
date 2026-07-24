@@ -1,15 +1,18 @@
 package http
 
-type redirect struct {
+// Redirect is a concrete Redirector implementation. It is exported so that
+// alternative transport implementations (e.g. HTTP/3) can construct
+// redirects with the same encoding contract.
+type Redirect struct {
 	URL  string
 	Code int
 }
 
-func (r *redirect) Redirect() (string, int) {
+func (r *Redirect) Redirect() (string, int) {
 	return r.URL, r.Code
 }
 
-func (r *redirect) Error() string {
+func (r *Redirect) Error() string {
 	return "redirect to " + r.URL
 }
 
@@ -18,5 +21,5 @@ func (r *redirect) Error() string {
 // If the Content-Type header has not been set, Redirect sets it to "text/html; charset=utf-8" and writes a small HTML body.
 // Setting the Content-Type header to any value, including nil, disables that behavior.
 func NewRedirect(url string, code int) Redirector {
-	return &redirect{URL: url, Code: code}
+	return &Redirect{URL: url, Code: code}
 }

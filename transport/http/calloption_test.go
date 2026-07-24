@@ -8,10 +8,10 @@ import (
 
 func TestEmptyCallOptions(t *testing.T) {
 	e := EmptyCallOption{}
-	if e.before(&callInfo{}) != nil {
+	if e.Before(&CallInfo{}) != nil {
 		t.Error("EmptyCallOption should be ignored")
 	}
-	e.after(&callInfo{}, &csAttempt{})
+	e.After(&CallInfo{}, &CsAttempt{})
 }
 
 func TestContentType(t *testing.T) {
@@ -21,13 +21,13 @@ func TestContentType(t *testing.T) {
 }
 
 func TestContentTypeCallOption_before(t *testing.T) {
-	c := &callInfo{}
-	err := ContentType("aaa").before(c)
+	c := &CallInfo{}
+	err := ContentType("aaa").Before(c)
 	if err != nil {
 		t.Errorf("unexpected error: %v", err)
 	}
-	if !reflect.DeepEqual("aaa", c.contentType) {
-		t.Errorf("want: %v, got: %v", "aaa", c.contentType)
+	if !reflect.DeepEqual("aaa", c.ContentType) {
+		t.Errorf("want: %v, got: %v", "aaa", c.ContentType)
 	}
 }
 
@@ -38,27 +38,27 @@ func TestAccept(t *testing.T) {
 }
 
 func TestAcceptCallOption_before(t *testing.T) {
-	c := &callInfo{}
-	err := Accept("aaa").before(c)
+	c := &CallInfo{}
+	err := Accept("aaa").Before(c)
 	if err != nil {
 		t.Errorf("unexpected error: %v", err)
 	}
-	if !reflect.DeepEqual("aaa", c.accept) {
-		t.Errorf("want: %v, got: %v", "aaa", c.accept)
+	if !reflect.DeepEqual("aaa", c.Accept) {
+		t.Errorf("want: %v, got: %v", "aaa", c.Accept)
 	}
 }
 
 func TestDefaultCallInfo(t *testing.T) {
 	path := "hi"
-	rv := defaultCallInfo(path)
-	if !reflect.DeepEqual(path, rv.pathTemplate) {
-		t.Errorf("expect %v, got %v", path, rv.pathTemplate)
+	rv := DefaultCallInfo(path)
+	if !reflect.DeepEqual(path, rv.PathTemplate) {
+		t.Errorf("expect %v, got %v", path, rv.PathTemplate)
 	}
-	if !reflect.DeepEqual(path, rv.operation) {
-		t.Errorf("expect %v, got %v", path, rv.operation)
+	if !reflect.DeepEqual(path, rv.Operation) {
+		t.Errorf("expect %v, got %v", path, rv.Operation)
 	}
-	if !reflect.DeepEqual("application/json", rv.contentType) {
-		t.Errorf("expect %v, got %v", "application/json", rv.contentType)
+	if !reflect.DeepEqual("application/json", rv.ContentType) {
+		t.Errorf("expect %v, got %v", "application/json", rv.ContentType)
 	}
 }
 
@@ -69,13 +69,13 @@ func TestOperation(t *testing.T) {
 }
 
 func TestOperationCallOption_before(t *testing.T) {
-	c := &callInfo{}
-	err := Operation("aaa").before(c)
+	c := &CallInfo{}
+	err := Operation("aaa").Before(c)
 	if err != nil {
 		t.Errorf("unexpected error: %v", err)
 	}
-	if !reflect.DeepEqual("aaa", c.operation) {
-		t.Errorf("want: %v, got: %v", "aaa", c.operation)
+	if !reflect.DeepEqual("aaa", c.Operation) {
+		t.Errorf("want: %v, got: %v", "aaa", c.Operation)
 	}
 }
 
@@ -86,43 +86,43 @@ func TestPathTemplate(t *testing.T) {
 }
 
 func TestPathTemplateCallOption_before(t *testing.T) {
-	c := &callInfo{}
-	err := PathTemplate("aaa").before(c)
+	c := &CallInfo{}
+	err := PathTemplate("aaa").Before(c)
 	if err != nil {
 		t.Errorf("unexpected error: %v", err)
 	}
-	if !reflect.DeepEqual("aaa", c.pathTemplate) {
-		t.Errorf("want: %v, got: %v", "aaa", c.pathTemplate)
+	if !reflect.DeepEqual("aaa", c.PathTemplate) {
+		t.Errorf("want: %v, got: %v", "aaa", c.PathTemplate)
 	}
 }
 
 func TestHeader(t *testing.T) {
 	h := http.Header{"A": []string{"123"}}
-	if !reflect.DeepEqual(Header(&h).(HeaderCallOption).header.Get("A"), "123") {
-		t.Errorf("want: %v,got: %v", "123", Header(&h).(HeaderCallOption).header.Get("A"))
+	if !reflect.DeepEqual(Header(&h).(HeaderCallOption).Header.Get("A"), "123") {
+		t.Errorf("want: %v,got: %v", "123", Header(&h).(HeaderCallOption).Header.Get("A"))
 	}
 }
 
 func TestHeaderCallOption_before(t *testing.T) {
 	h := http.Header{"A": []string{"123"}}
-	c := &callInfo{}
+	c := &CallInfo{}
 	o := Header(&h)
-	err := o.before(c)
+	err := o.Before(c)
 	if err != nil {
 		t.Errorf("unexpected error: %v", err)
 	}
-	if !reflect.DeepEqual(&h, c.headerCarrier) {
-		t.Errorf("want: %v,got: %v", &h, o.(HeaderCallOption).header)
+	if !reflect.DeepEqual(&h, c.HeaderCarrier) {
+		t.Errorf("want: %v,got: %v", &h, o.(HeaderCallOption).Header)
 	}
 }
 
 func TestHeaderCallOption_after(t *testing.T) {
 	h := http.Header{"A": []string{"123"}}
-	c := &callInfo{}
-	cs := &csAttempt{res: &http.Response{Header: h}}
+	c := &CallInfo{}
+	cs := &CsAttempt{Res: &http.Response{Header: h}}
 	o := Header(&h)
-	o.after(c, cs)
-	if !reflect.DeepEqual(&h, o.(HeaderCallOption).header) {
-		t.Errorf("want: %v,got: %v", &h, o.(HeaderCallOption).header)
+	o.After(c, cs)
+	if !reflect.DeepEqual(&h, o.(HeaderCallOption).Header) {
+		t.Errorf("want: %v,got: %v", &h, o.(HeaderCallOption).Header)
 	}
 }

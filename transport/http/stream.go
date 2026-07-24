@@ -643,21 +643,21 @@ func (client *Client) ServerSentEvent(ctx context.Context, method, path string, 
 		contentType string
 		body        io.Reader
 	)
-	c := defaultCallInfo(path)
+	c := DefaultCallInfo(path)
 	for _, o := range opts {
-		if err := o.before(&c); err != nil {
+		if err := o.Before(&c); err != nil {
 			return nil, err
 		}
 	}
 	if args != nil {
-		data, err := client.opts.encoder(ctx, c.contentType, args)
+		data, err := client.opts.encoder(ctx, c.ContentType, args)
 		if err != nil {
 			return nil, err
 		}
-		contentType = c.contentType
+		contentType = c.ContentType
 		body = bytes.NewReader(data)
-	} else if c.contentTypeSet {
-		contentType = c.contentType
+	} else if c.ContentTypeSet {
+		contentType = c.ContentType
 	}
 	url := fmt.Sprintf("%s://%s%s", client.target.Scheme, client.target.Authority, path)
 	req, err := stdhttp.NewRequest(method, url, body)
@@ -668,16 +668,16 @@ func (client *Client) ServerSentEvent(ctx context.Context, method, path string, 
 	ctx = transport.NewClientContext(ctx, &Transport{
 		endpoint:     client.opts.endpoint,
 		reqHeader:    headerCarrier(req.Header),
-		operation:    c.operation,
+		operation:    c.Operation,
 		request:      req,
-		pathTemplate: c.pathTemplate,
+		pathTemplate: c.PathTemplate,
 	})
 	h := func(ctx context.Context, _ any) (any, error) {
 		res, doErr := client.do(req.WithContext(ctx)) //nolint:bodyclose // newSSEClientStream owns and closes res.Body on success.
 		if res != nil {
-			cs := csAttempt{res: res}
+			cs := CsAttempt{Res: res}
 			for _, o := range opts {
-				o.after(&c, &cs)
+				o.After(&c, &cs)
 			}
 		}
 		if doErr != nil {
@@ -702,9 +702,9 @@ func (client *Client) ServerSentEvent(ctx context.Context, method, path string, 
 
 // WebSocket opens an HTTP bidirectional streaming call over WebSocket.
 func (client *Client) WebSocket(ctx context.Context, path string, opts ...CallOption) (ClientStream, error) {
-	c := defaultCallInfo(path)
+	c := DefaultCallInfo(path)
 	for _, o := range opts {
-		if err := o.before(&c); err != nil {
+		if err := o.Before(&c); err != nil {
 			return nil, err
 		}
 	}
@@ -714,14 +714,14 @@ func (client *Client) WebSocket(ctx context.Context, path string, opts ...CallOp
 	}
 	url := fmt.Sprintf("%s://%s%s", scheme, client.target.Authority, path)
 	header := stdhttp.Header{}
-	if c.headerCarrier != nil {
-		header = *c.headerCarrier
+	if c.HeaderCarrier != nil {
+		header = *c.HeaderCarrier
 	}
-	if c.accept != "" {
-		header.Set("Accept", c.accept)
+	if c.Accept != "" {
+		header.Set("Accept", c.Accept)
 	}
-	if c.contentTypeSet {
-		header.Set("Content-Type", c.contentType)
+	if c.ContentTypeSet {
+		header.Set("Content-Type", c.ContentType)
 	}
 	if client.opts.userAgent != "" {
 		header.Set("User-Agent", client.opts.userAgent)
@@ -734,9 +734,9 @@ func (client *Client) WebSocket(ctx context.Context, path string, opts ...CallOp
 	ctx = transport.NewClientContext(ctx, &Transport{
 		endpoint:     client.opts.endpoint,
 		reqHeader:    headerCarrier(req.Header),
-		operation:    c.operation,
+		operation:    c.Operation,
 		request:      req,
-		pathTemplate: c.pathTemplate,
+		pathTemplate: c.PathTemplate,
 	})
 
 	h := func(ctx context.Context, _ any) (any, error) {
@@ -770,9 +770,9 @@ func (client *Client) WebSocket(ctx context.Context, path string, opts ...CallOp
 		}
 		conn, res, dialErr := websocket.Dial(ctx, dialURL, &dialer)
 		if res != nil {
-			cs := csAttempt{res: res}
+			cs := CsAttempt{Res: res}
 			for _, o := range opts {
-				o.after(&c, &cs)
+				o.After(&c, &cs)
 			}
 		}
 		if dialErr != nil {
@@ -824,15 +824,15 @@ func clientStreamFromHandler(v any) (ClientStream, error) {
 	return stream, nil
 }
 
-func prepareClientRequest(client *Client, req *stdhttp.Request, contentType string, c callInfo) {
-	if c.headerCarrier != nil {
-		req.Header = *c.headerCarrier
+func prepareClientRequest(client *Client, req *stdhttp.Request, contentType string, c CallInfo) {
+	if c.HeaderCarrier != nil {
+		req.Header = *c.HeaderCarrier
 	}
 	if contentType != "" {
-		req.Header.Set("Content-Type", c.contentType)
+		req.Header.Set("Content-Type", c.ContentType)
 	}
-	if c.accept != "" {
-		req.Header.Set("Accept", c.accept)
+	if c.Accept != "" {
+		req.Header.Set("Accept", c.Accept)
 	}
 	if client.opts.userAgent != "" {
 		req.Header.Set("User-Agent", client.opts.userAgent)
@@ -884,13 +884,13 @@ func readWebSocketMessage(ctx context.Context, conn *websocket.Conn, m any, code
 	}
 }
 
-func streamCodecFromCallInfo(c callInfo, names ...string) encoding.Codec {
+func streamCodecFromCallInfo(c CallInfo, names ...string) encoding.Codec {
 	header := stdhttp.Header{}
-	if c.accept != "" {
-		header.Set("Accept", c.accept)
+	if c.Accept != "" {
+		header.Set("Accept", c.Accept)
 	}
-	if c.contentTypeSet {
-		header.Set("Content-Type", c.contentType)
+	if c.ContentTypeSet {
+		header.Set("Content-Type", c.ContentType)
 	}
 	return streamCodecFromHeaders(header, names...)
 }

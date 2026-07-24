@@ -134,7 +134,7 @@ func DefaultResponseEncoder(w http.ResponseWriter, r *http.Request, v any) error
 
 // DefaultErrorEncoder encodes the error to the HTTP response.
 func DefaultErrorEncoder(w http.ResponseWriter, r *http.Request, err error) {
-	var rd *redirect
+	var rd *Redirect
 	if errors.As(err, &rd) {
 		url, code := rd.Redirect()
 		http.Redirect(w, r, url, code)
@@ -164,6 +164,13 @@ func CodecForRequest(r *http.Request, name string) (encoding.Codec, bool) {
 }
 
 func httpBody(v any) (*httpbody.HttpBody, bool) {
+	return HTTPBody(v)
+}
+
+// HTTPBody extracts a *google.api.HttpBody from v when v holds one, returning
+// the body and true. It is exported so alternative transport implementations
+// (e.g. HTTP/3) can reuse the same handling.
+func HTTPBody(v any) (*httpbody.HttpBody, bool) {
 	switch body := v.(type) {
 	case *httpbody.HttpBody:
 		return body, body != nil

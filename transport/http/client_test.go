@@ -47,14 +47,14 @@ type mockCallOption struct {
 	needErr bool
 }
 
-func (x *mockCallOption) before(_ *callInfo) error {
+func (x *mockCallOption) Before(_ *CallInfo) error {
 	if x.needErr {
 		return errors.New("option need return err")
 	}
 	return nil
 }
 
-func (x *mockCallOption) after(_ *callInfo, _ *csAttempt) {
+func (x *mockCallOption) After(_ *CallInfo, _ *CsAttempt) {
 	log.Println("run in mockCallOption.after")
 }
 

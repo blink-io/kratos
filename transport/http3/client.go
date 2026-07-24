@@ -1,4 +1,4 @@
-package http
+package http3
 
 import (
 	"bytes"
@@ -8,6 +8,9 @@ import (
 	"io"
 	"net/http"
 	"time"
+
+	"github.com/quic-go/quic-go"
+	"github.com/quic-go/quic-go/http3"
 
 	"github.com/go-kratos/kratos/v3/encoding"
 	"github.com/go-kratos/kratos/v3/errors"
@@ -35,10 +38,9 @@ type EncodeRequestFunc func(ctx context.Context, contentType string, in any) (bo
 // DecodeResponseFunc is response decode func.
 type DecodeResponseFunc func(ctx context.Context, res *http.Response, out any) error
 
-// ClientOption is HTTP client option.
+// ClientOption is HTTP/3 client option.
 type ClientOption func(*clientOptions)
 
-// Client is an HTTP transport client.
 type clientOptions struct {
 	ctx          context.Context
 	tlsConf      *tls.Config
@@ -49,6 +51,7 @@ type clientOptions struct {
 	decoder      DecodeResponseFunc
 	errorDecoder DecodeErrorFunc
 	transport    http.RoundTripper
+	quicConf     *quic.Config
 	nodeFilters  []selector.NodeFilter
 	discovery    registry.Discovery
 	middleware   []middleware.Middleware
@@ -57,7 +60,7 @@ type clientOptions struct {
 }
 
 // WithSubset with client discovery subset size.
-// zero value means subset filter disabled
+// zero value means subset filter disabled.
 func WithSubset(size int) ClientOption {
 	return func(o *clientOptions) {
 		o.subsetSize = size
@@ -127,7 +130,7 @@ func WithDiscovery(d registry.Discovery) ClientOption {
 	}
 }
 
-// WithNodeFilter with select filters
+// WithNodeFilter with select filters.
 func WithNodeFilter(filters ...selector.NodeFilter) ClientOption {
 	return func(o *clientOptions) {
 		o.nodeFilters = filters
@@ -141,24 +144,33 @@ func WithBlock() ClientOption {
 	}
 }
 
-// WithTLSConfig with tls config.
+// WithTLSConfig with tls config. HTTP/3 requires TLS for the QUIC handshake;
+// the NextProtos is left alone so the client can advertise other protocols
+// when desired.
 func WithTLSConfig(c *tls.Config) ClientOption {
 	return func(o *clientOptions) {
 		o.tlsConf = c
 	}
 }
 
-// Client is an HTTP client.
+// WithQUICConfig with custom QUIC configuration applied to the underlying
+// http3.Transport (e.g. to enable datagrams).
+func WithQUICConfig(c *quic.Config) ClientOption {
+	return func(o *clientOptions) {
+		o.quicConf = c
+	}
+}
+
+// Client is an HTTP/3 client.
 type Client struct {
 	opts     clientOptions
 	target   *Target
 	r        *resolver
 	cc       *http.Client
-	insecure bool
 	selector selector.Selector
 }
 
-// NewClient returns an HTTP client.
+// NewClient returns an HTTP/3 client.
 func NewClient(ctx context.Context, opts ...ClientOption) (*Client, error) {
 	options := clientOptions{
 		ctx:          ctx,
@@ -166,21 +178,19 @@ func NewClient(ctx context.Context, opts ...ClientOption) (*Client, error) {
 		encoder:      DefaultRequestEncoder,
 		decoder:      DefaultResponseDecoder,
 		errorDecoder: DefaultErrorDecoder,
-		transport:    http.DefaultTransport,
 		subsetSize:   25,
 	}
 	for _, o := range opts {
 		o(&options)
 	}
-	if options.tlsConf != nil {
-		if tr, ok := options.transport.(*http.Transport); ok {
-			cloned := tr.Clone()
-			cloned.TLSClientConfig = options.tlsConf
-			options.transport = cloned
+	if options.transport == nil {
+		ht := &http3.Transport{
+			TLSClientConfig: options.tlsConf,
+			QUICConfig:      options.quicConf,
 		}
+		options.transport = ht
 	}
-	insecure := options.tlsConf == nil
-	target, err := parseTarget(options.endpoint, insecure)
+	target, err := parseTarget(options.endpoint)
 	if err != nil {
 		return nil, err
 	}
@@ -188,33 +198,32 @@ func NewClient(ctx context.Context, opts ...ClientOption) (*Client, error) {
 	var r *resolver
 	if options.discovery != nil {
 		if target.Scheme == schemeDiscovery {
-			if r, err = newResolver(ctx, options.discovery, target, selector, options.block, insecure, options.subsetSize); err != nil {
-				return nil, fmt.Errorf("[http client] new resolver failed for endpoint %q: %w", options.endpoint, err)
+			if r, err = newResolver(ctx, options.discovery, target, selector, options.block, options.subsetSize); err != nil {
+				return nil, fmt.Errorf("[http3 client] new resolver failed for endpoint %q: %w", options.endpoint, err)
 			}
 		} else if _, _, err := host.ExtractHostPort(options.endpoint); err != nil {
-			return nil, fmt.Errorf("[http client] invalid endpoint format %q: %w", options.endpoint, err)
+			return nil, fmt.Errorf("[http3 client] invalid endpoint format %q: %w", options.endpoint, err)
 		}
 	}
 	return &Client{
 		opts:     options,
 		target:   target,
-		insecure: insecure,
 		r:        r,
+		selector: selector,
 		cc: &http.Client{
 			Timeout:   options.timeout,
 			Transport: options.transport,
 		},
-		selector: selector,
 	}, nil
 }
 
-// Invoke makes a rpc call procedure for remote service.
+// Invoke makes an RPC call procedure for remote service.
 func (client *Client) Invoke(ctx context.Context, method, path string, args any, reply any, opts ...CallOption) error {
 	var (
 		contentType string
 		body        io.Reader
 	)
-	c := DefaultCallInfo(path)
+	c := defaultCallInfo(path)
 	for _, o := range opts {
 		if err := o.Before(&c); err != nil {
 			return err
@@ -283,10 +292,10 @@ func (client *Client) invoke(ctx context.Context, req *http.Request, args any, r
 	return err
 }
 
-// Do send an HTTP request and decodes the body of response into target.
+// Do send an HTTP/3 request and decodes the body of response into target.
 // returns an error (of type *Error) if the response status code is not 2xx.
 func (client *Client) Do(req *http.Request, opts ...CallOption) (*http.Response, error) {
-	c := DefaultCallInfo(req.URL.Path)
+	c := defaultCallInfo(req.URL.Path)
 	for _, o := range opts {
 		if err := o.Before(&c); err != nil {
 			return nil, err
@@ -306,11 +315,7 @@ func (client *Client) do(req *http.Request) (*http.Response, error) {
 		if node, done, err = client.selector.Select(req.Context(), selector.WithNodeFilter(client.opts.nodeFilters...)); err != nil {
 			return nil, errors.ServiceUnavailable("NODE_NOT_FOUND", err.Error())
 		}
-		if client.insecure {
-			req.URL.Scheme = schemeHTTP
-		} else {
-			req.URL.Scheme = schemeHTTPS
-		}
+		req.URL.Scheme = schemeHTTPS
 		req.URL.Host = node.Address()
 		req.Host = node.Address()
 	}
@@ -337,12 +342,15 @@ func (client *Client) do(req *http.Request) (*http.Response, error) {
 // Close tears down the Transport and all underlying connections.
 func (client *Client) Close() error {
 	if client.r != nil {
-		return client.r.Close()
+		_ = client.r.Close()
+	}
+	if tr, ok := client.opts.transport.(io.Closer); ok {
+		return tr.Close()
 	}
 	return nil
 }
 
-// DefaultRequestEncoder is an HTTP request encoder.
+// DefaultRequestEncoder is an HTTP/3 request encoder.
 func DefaultRequestEncoder(_ context.Context, contentType string, in any) ([]byte, error) {
 	if body, ok := httpBody(in); ok {
 		return body.GetData(), nil
@@ -359,7 +367,7 @@ func DefaultRequestEncoder(_ context.Context, contentType string, in any) ([]byt
 	return body, err
 }
 
-// DefaultResponseDecoder is an HTTP response decoder.
+// DefaultResponseDecoder is an HTTP/3 response decoder.
 func DefaultResponseDecoder(_ context.Context, res *http.Response, v any) error {
 	defer res.Body.Close()
 	data, err := io.ReadAll(res.Body)
@@ -374,7 +382,7 @@ func DefaultResponseDecoder(_ context.Context, res *http.Response, v any) error 
 	return CodecForResponse(res).Unmarshal(data, v)
 }
 
-// DefaultErrorDecoder is an HTTP error decoder.
+// DefaultErrorDecoder is an HTTP/3 error decoder.
 func DefaultErrorDecoder(_ context.Context, res *http.Response) error {
 	if res.StatusCode >= 200 && res.StatusCode <= 299 {
 		return nil
@@ -391,7 +399,7 @@ func DefaultErrorDecoder(_ context.Context, res *http.Response) error {
 	return errors.Newf(res.StatusCode, errors.UnknownReason, "").WithCause(err)
 }
 
-// CodecForResponse get encoding.Codec via http.Response
+// CodecForResponse get encoding.Codec via http.Response.
 func CodecForResponse(r *http.Response) encoding.Codec {
 	codec := encoding.GetCodec(httputil.ContentSubtype(r.Header.Get("Content-Type")))
 	if codec != nil {
