@@ -7,9 +7,10 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"strings"
 	"time"
 
-	"github.com/gorilla/mux"
+	"github.com/go-chi/chi/v5"
 
 	"github.com/go-kratos/kratos/v3/internal/endpoint"
 	"github.com/go-kratos/kratos/v3/internal/host"
@@ -112,7 +113,7 @@ func TLSConfig(c *tls.Config) ServerOption {
 	}
 }
 
-// StrictSlash is with mux's StrictSlash
+// StrictSlash is with router's StrictSlash option.
 // If true, when the path pattern is "/path/", accessing "/path" will
 // redirect to the former and vice versa.
 func StrictSlash(strictSlash bool) ServerOption {
@@ -128,22 +129,24 @@ func Listener(lis net.Listener) ServerOption {
 	}
 }
 
-// PathPrefix with mux's PathPrefix, router will be replaced by a subrouter that start with prefix.
+// PathPrefix with router's PathPrefix, router will be replaced by a subrouter that start with prefix.
 func PathPrefix(prefix string) ServerOption {
 	return func(s *Server) {
-		s.router = s.router.PathPrefix(prefix).Subrouter()
+		sub := chi.NewRouter()
+		s.router.Mount(prefix, sub)
+		s.router = sub
 	}
 }
 
 func NotFoundHandler(handler http.Handler) ServerOption {
 	return func(s *Server) {
-		s.router.NotFoundHandler = handler
+		s.router.NotFound(toHandlerFunc(handler))
 	}
 }
 
 func MethodNotAllowedHandler(handler http.Handler) ServerOption {
 	return func(s *Server) {
-		s.router.MethodNotAllowedHandler = handler
+		s.router.MethodNotAllowed(toHandlerFunc(handler))
 	}
 }
 
@@ -165,7 +168,7 @@ type Server struct {
 	enc         EncodeResponseFunc
 	ene         EncodeErrorFunc
 	strictSlash bool
-	router      *mux.Router
+	router      *chi.Mux
 }
 
 // NewServer creates an HTTP server by options.
@@ -181,15 +184,15 @@ func NewServer(opts ...ServerOption) *Server {
 		enc:         DefaultResponseEncoder,
 		ene:         DefaultErrorEncoder,
 		strictSlash: true,
-		router:      mux.NewRouter(),
+		router:      chi.NewRouter(),
 	}
-	srv.router.NotFoundHandler = http.DefaultServeMux
-	srv.router.MethodNotAllowedHandler = http.DefaultServeMux
+	srv.router.NotFound(toHandlerFunc(http.DefaultServeMux))
+	srv.router.MethodNotAllowed(toHandlerFunc(http.DefaultServeMux))
 	for _, o := range opts {
 		o(srv)
 	}
-	srv.router.StrictSlash(srv.strictSlash)
 	srv.router.Use(srv.filter())
+	srv.applyStrictSlash()
 	srv.Server = &http.Server{
 		Handler:   FilterChain(srv.filters...)(srv.router),
 		TLSConfig: srv.tlsConf,
@@ -208,21 +211,11 @@ func (s *Server) Use(selector string, m ...middleware.Middleware) {
 
 // WalkRoute walks the router and all its sub-routers, calling walkFn for each route in the tree.
 func (s *Server) WalkRoute(fn WalkRouteFunc) error {
-	return s.router.Walk(func(route *mux.Route, _ *mux.Router, _ []*mux.Route) error {
-		methods, err := route.GetMethods()
-		if err != nil {
-			return nil // ignore no methods
+	return chi.Walk(s.router, func(method string, route string, _ http.Handler, _ ...func(http.Handler) http.Handler) error {
+		if method == "*" {
+			return nil
 		}
-		path, err := route.GetPathTemplate()
-		if err != nil {
-			return err
-		}
-		for _, method := range methods {
-			if err := fn(RouteInfo{Method: method, Path: path}); err != nil {
-				return err
-			}
-		}
-		return nil
+		return fn(RouteInfo{Method: method, Path: route})
 	})
 }
 
@@ -245,8 +238,20 @@ func (s *Server) Handle(path string, h http.Handler) {
 }
 
 // HandlePrefix registers a new route with a matcher for the URL path prefix.
+// The handler receives the request with the original URL path intact.
 func (s *Server) HandlePrefix(prefix string, h http.Handler) {
-	s.router.PathPrefix(prefix).Handler(h)
+	// gorilla/mux's PathPrefix(prefix).Handler(h) matches every request
+	// whose path begins with prefix. We register two patterns via chi's
+	// Handle (which matches every HTTP method):
+	//   - prefix        -> exact prefix (no trailing characters)
+	//   - prefix "/" "*" -> path segments below the prefix
+	if strings.HasSuffix(prefix, "/") {
+		s.router.Handle(prefix+"*", h)
+	} else {
+		s.router.Handle(prefix, h)
+		s.router.Handle(prefix+"/", h)
+		s.router.Handle(prefix+"/*", h)
+	}
 }
 
 // HandleFunc registers a new route with a matcher for the URL path.
@@ -256,7 +261,7 @@ func (s *Server) HandleFunc(path string, h http.HandlerFunc) {
 
 // HandleHeader registers a new route with a matcher for the header.
 func (s *Server) HandleHeader(key, val string, h http.HandlerFunc) {
-	s.router.Headers(key, val).Handler(h)
+	s.router.With(headerMatcher(key, val)).HandleFunc("/", h)
 }
 
 // ServeHTTP should write reply headers and data to the ResponseWriter and then return.
@@ -264,7 +269,7 @@ func (s *Server) ServeHTTP(res http.ResponseWriter, req *http.Request) {
 	s.Handler.ServeHTTP(res, req)
 }
 
-func (s *Server) filter() mux.MiddlewareFunc {
+func (s *Server) filter() func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 			var (
@@ -279,9 +284,10 @@ func (s *Server) filter() mux.MiddlewareFunc {
 			defer cancel()
 
 			pathTemplate := req.URL.Path
-			if route := mux.CurrentRoute(req); route != nil {
-				// /path/123 -> /path/{id}
-				pathTemplate, _ = route.GetPathTemplate()
+			if rctx := chi.RouteContext(req.Context()); rctx != nil {
+				if p := rctx.RoutePattern(); p != "" {
+					pathTemplate = p
+				}
 			}
 
 			tr := &Transport{
@@ -299,6 +305,78 @@ func (s *Server) filter() mux.MiddlewareFunc {
 			next.ServeHTTP(w, tr.request)
 		})
 	}
+}
+
+// applyStrictSlash installs a middleware on the router that replicates the
+// gorilla/mux StrictSlash behavior: if a registered route exists only with a
+// trailing slash (or without one), requests to the alternate form are
+// redirected (301) to the registered form.
+func (s *Server) applyStrictSlash() {
+	if !s.strictSlash {
+		return
+	}
+	router := s.router
+	s.router.Use(strictSlashMiddleware(router))
+}
+
+func strictSlashMiddleware(router *chi.Mux) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			path := r.URL.Path
+			if path == "" {
+				next.ServeHTTP(w, r)
+				return
+			}
+			rctx := chi.NewRouteContext()
+			if router.Find(rctx, r.Method, path) != "" {
+				next.ServeHTTP(w, r)
+				return
+			}
+			var alt string
+			if strings.HasSuffix(path, "/") {
+				alt = strings.TrimRight(path, "/")
+				if alt == "" {
+					next.ServeHTTP(w, r)
+					return
+				}
+			} else {
+				alt = path + "/"
+			}
+			if router.Find(rctx, r.Method, alt) != "" {
+				if r.URL.RawQuery != "" {
+					alt = alt + "?" + r.URL.RawQuery
+				}
+				http.Redirect(w, r, alt, http.StatusMovedPermanently)
+				return
+			}
+			next.ServeHTTP(w, r)
+		})
+	}
+}
+
+// headerMatcher returns a middleware that only continues if the request has
+// the given header set to the given value. Mismatched/missing headers yield
+// a 404, matching gorilla/mux's Headers().Handler() behaviour.
+func headerMatcher(key, val string) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.Header.Get(key) != val {
+				http.NotFound(w, r)
+				return
+			}
+			next.ServeHTTP(w, r)
+		})
+	}
+}
+
+func toHandlerFunc(h http.Handler) http.HandlerFunc {
+	if h == nil {
+		return http.HandlerFunc(http.NotFound)
+	}
+	if hf, ok := h.(http.HandlerFunc); ok {
+		return hf
+	}
+	return http.HandlerFunc(h.ServeHTTP)
 }
 
 // Endpoint return a real address to registry endpoint.

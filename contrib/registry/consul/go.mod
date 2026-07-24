@@ -24,7 +24,7 @@ require (
 	github.com/mattn/go-isatty v0.0.22 // indirect
 	github.com/mitchellh/go-homedir v1.1.0 // indirect
 	golang.org/x/exp v0.0.0-20260508232706-74f9aab9d74a // indirect
-	golang.org/x/sys v0.44.0 // indirect
+	golang.org/x/sys v0.47.0 // indirect
 )
 
 replace github.com/go-kratos/kratos/v3 => ../../../

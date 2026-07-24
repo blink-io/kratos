@@ -373,18 +373,41 @@ func TestListener(t *testing.T) {
 }
 
 func TestNotFoundHandler(t *testing.T) {
-	mux := http.NewServeMux()
-	srv := NewServer(NotFoundHandler(mux))
-	if !reflect.DeepEqual(srv.router.NotFoundHandler, mux) {
-		t.Errorf("expected %v got %v", mux, srv.router.NotFoundHandler)
+	var called bool
+	h := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		called = true
+		w.WriteHeader(http.StatusTeapot)
+	})
+	srv := NewServer(NotFoundHandler(h))
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/no-such-path", nil)
+	srv.ServeHTTP(w, req)
+	if w.Code != http.StatusTeapot {
+		t.Errorf("expected status %d got %d", http.StatusTeapot, w.Code)
+	}
+	if !called {
+		t.Errorf("expected NotFoundHandler to be invoked")
 	}
 }
 
 func TestMethodNotAllowedHandler(t *testing.T) {
-	mux := http.NewServeMux()
-	srv := NewServer(MethodNotAllowedHandler(mux))
-	if !reflect.DeepEqual(srv.router.MethodNotAllowedHandler, mux) {
-		t.Errorf("expected %v got %v", mux, srv.router.MethodNotAllowedHandler)
+	var called bool
+	h := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		called = true
+		w.WriteHeader(http.StatusTeapot)
+	})
+	srv := NewServer(MethodNotAllowedHandler(h))
+	srv.router.Method(http.MethodPost, "/only-post", http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/only-post", nil)
+	srv.ServeHTTP(w, req)
+	if w.Code != http.StatusTeapot {
+		t.Errorf("expected status %d got %d", http.StatusTeapot, w.Code)
+	}
+	if !called {
+		t.Errorf("expected MethodNotAllowedHandler to be invoked")
 	}
 }
 

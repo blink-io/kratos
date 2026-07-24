@@ -9,7 +9,7 @@ import (
 	"net/url"
 	"time"
 
-	"github.com/gorilla/mux"
+	"github.com/go-chi/chi/v5"
 
 	"github.com/go-kratos/kratos/v3/middleware"
 	"github.com/go-kratos/kratos/v3/transport"
@@ -70,10 +70,13 @@ func (c *wrapper) Header() http.Header {
 }
 
 func (c *wrapper) Vars() url.Values {
-	raws := mux.Vars(c.req)
-	vars := make(url.Values, len(raws))
-	for k, v := range raws {
-		vars[k] = []string{v}
+	rctx := chi.RouteContext(c.req.Context())
+	if rctx == nil {
+		return url.Values{}
+	}
+	vars := make(url.Values, len(rctx.URLParams.Keys))
+	for i, k := range rctx.URLParams.Keys {
+		vars[k] = []string{rctx.URLParams.Values[i]}
 	}
 	return vars
 }
